@@ -1,0 +1,59 @@
+#!/usr/bin/perl
+# LinuxBox's kernel clock marker. The harness owns this state;
+# the product only ever reads it.
+#
+#   kernel-clock synced    mark the clock synchronized, 0.5 s maximum error
+#   kernel-clock unsynced  set STA_UNSYNC
+#   kernel-clock show      read only
+#   kernel-clock keep      mark it synchronized every millisecond until
+#                          killed, except while /run/kernel-clock/paused
+#                          exists: Docker Desktop's VM steps its clock on its
+#                          own every half minute or so, and a step clears the
+#                          mark (the kernel's ntp_clear)
+#
+# Kernel time state is one per Docker VM, not per container, and setting it
+# needs CAP_SYS_TIME. One adjtimex(2) through perl-base's syscall(), since
+# debian:13-slim ships no compiler and no adjtimex tool.
+use strict;
+use warnings;
+
+my %number = (aarch64 => 171, x86_64 => 159);
+my $arch = `uname -m`;
+chomp $arch;
+my $adjtimex = $number{$arch} or die "kernel-clock: unsupported architecture $arch\n";
+
+# struct timex on 64-bit Linux: 208 bytes.
+my $layout = 'L x4 q q q q l x4 q q q q q q q q l x4 q q q q q l x44';
+my ($ADJ_MAXERROR, $ADJ_ESTERROR, $ADJ_STATUS, $STA_UNSYNC) = (0x04, 0x08, 0x10, 0x40);
+my $pause = '/run/kernel-clock/paused';
+
+sub timex {
+    my ($modes, $maxerror, $esterror, $status) = @_;
+    return pack $layout, $modes, 0, 0, $maxerror, $esterror, $status, (0) x 15;
+}
+
+# Fills the caller's buffer in place ($_[0] aliases it).
+sub adjtimex {
+    my $state = syscall($adjtimex, $_[0]);
+    die "kernel-clock: adjtimex: $!\n" if $state == -1;
+    return $state;
+}
+
+my $synced = timex($ADJ_STATUS | $ADJ_MAXERROR | $ADJ_ESTERROR, 500_000, 100_000, 0);
+my %timex = (
+    synced   => $synced,
+    unsynced => timex($ADJ_STATUS | $ADJ_MAXERROR, 16_000_000, 0, $STA_UNSYNC),
+    show     => timex(0, 0, 0, 0),
+);
+
+my $what = shift // 'show';
+if ($what eq 'keep') {
+    while (1) {
+        adjtimex(my $mark = $synced) unless -e $pause;
+        select(undef, undef, undef, 0.001);
+    }
+}
+my $timex = $timex{$what} // die "kernel-clock: synced | unsynced | show | keep\n";
+my $state = adjtimex($timex);
+my @field = unpack $layout, $timex;
+printf "state=%d status=0x%x maxerror_us=%d\n", $state, $field[5], $field[3];

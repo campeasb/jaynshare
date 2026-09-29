@@ -1,0 +1,16 @@
+# Override for a pool instance with MITM mode on: publishes the proxy
+# listener beside the base-URL one, in long form on the same explicit
+# host address. Use it as a second file:
+#
+#   docker compose -p <name> -f compose.yaml -f compose.mitm.yaml up -d
+#
+#   JAYNSHARE_PROXY_PORT  one explicit unique host port for `[mitm] listen`;
+#                         the target equals the port that setting binds
+services:
+  server:
+    ports:
+      - mode: host
+        protocol: tcp
+        host_ip: ${JAYNSHARE_HOST_IP:?set JAYNSHARE_HOST_IP to an explicit private or loopback address}
+        published: "${JAYNSHARE_PROXY_PORT:?set JAYNSHARE_PROXY_PORT to an explicit unique host port}"
+        target: 17422

@@ -9,120 +9,145 @@ Jaynshare is a **trusted intermediary**. It is not end-to-end encrypted between
 Claude Code and Anthropic:
 
 ```text
-Claude Code  == private-network transport ==>  Jaynshare  == verified TLS ==>  Anthropic
-                                                  |
-                                      plaintext requests and responses
+Claude Code  == TLS under the pool's CA ==>  Jaynshare  == verified TLS ==>  Anthropic
+                                                 |
+                                     plaintext requests and responses
 ```
 
-The server must read request bodies to select a model/account, rewrite account
-metadata, buffer a request for retry, and inject the selected account's
-credential. In MITM mode it terminates TLS for the configured Anthropic host
-with a Jaynshare CA, then opens and verifies a new TLS connection to Anthropic.
-In base-URL mode Claude Code sends the request directly to Jaynshare. The
-documented remote deployment relies on Tailscale to encrypt the client-to-server
-network link.
+`jaynshare claude` launches Claude Code with the pool's forward proxy and the
+pool's CA. Claude Code's TLS session to `api.anthropic.com` ends at the
+Jaynshare server, which then opens its own verified TLS connection to
+Anthropic. The server must read request bodies to pick an account, inject that
+account's credential, and buffer the request so it can retry it on another
+account.
 
-Consequently, the server operator—and anyone who compromises the host or the
-deployed Jaynshare code—can read prompts, code context, tool results,
-attachments, and model responses. They can also alter a request or response,
-including injecting malicious instructions or code. Client authentication and
-TLS protect the service from outsiders; they do not protect a client from the
-server operator. There is no technical control that can make an untrusted
-Jaynshare operator safe while preserving the current routing design.
+Consequently, the server operator — and anyone who compromises the host or the
+deployed binary — can read prompts, code context, tool results, attachments,
+and model responses. They can also alter a request or a response, including
+injecting malicious instructions or code. Client authentication and TLS
+protect the service from outsiders; they do not protect a client from the
+server operator. No technical control makes an untrusted operator safe while
+keeping this routing design.
+
+The operator is whoever can reach the server's loopback listener or control its
+systemd unit, Docker daemon or Compose project. See
+[the server installation notes](../deploy/README-server.md).
 
 ## Who can see or influence what?
 
 | Actor | Access and influence |
 | --- | --- |
-| Server operator | Can access provider credentials and all traffic handled by the server, change the deployed code or configuration, enable body logging, revoke clients, and change routing. Must be fully trusted. |
-| Enrolled client A | Sends and receives its own traffic. Can see the fleet metadata listed below and can prefer an eligible account for its own session. Cannot use a client credential to read client B's prompts, responses, or session assignment, or to call operator control endpoints. |
-| Other account owners | Do not receive request bodies through Jaynshare, but their provider account may carry another user's request. That usage is subject to that account's provider contract, organization settings, and data controls. |
-| Anthropic or another configured backend | Receives the content routed to it under the selected account. Its own terms, retention, and privacy controls apply. |
-| Network peer without a Jaynshare credential | Is rejected by the data and control planes. Network exposure should still be restricted with Tailscale grants/ACLs and host firewall rules. |
+| Server operator | Can access provider credentials and all traffic the server handles, change the deployed binary or configuration, turn on wire capture, issue and revoke clients, and change routing. Must be fully trusted. |
+| Enrolled client A | Sends and receives its own traffic. Can see the pool metadata listed below and can pick an eligible account for its own session. Cannot use its credential to read client B's prompts, responses or sessions, or to call the operator surface. |
+| Other account owners | Do not receive request bodies through Jaynshare, but their provider account may carry another participant's request. That usage falls under that account's provider terms and settings. |
+| Anthropic | Receives the content routed to it under the selected account. Its own terms, retention and privacy controls apply. |
+| Network peer without a Jaynshare credential | Is refused by the proxy and the control surface. Network exposure should still be restricted with network policy and host firewall rules. |
 
-An enrolled client can call the read-only usage endpoints. These deliberately
-expose account display name, account type, organization name, priority,
-availability, quota/reset state, aggregate token/request usage, and aggregate
-session counts. They do **not** expose provider tokens, client secrets, prompt or
-response bodies, other clients' session IDs, or the operator API.
+An enrolled client's status read is an explicit allow-list. It exposes each
+account's display name and its five-hour and weekly utilisation, how many
+accounts are configured and selectable, how many sessions are known and
+active, the server version, the CA fingerprint, whether wire capture is on,
+and, for the client's own session, the account that last served it. It does
+**not** expose provider credentials, per-account identity or routes, the
+configuration, other clients, other clients' sessions, or any request or
+response body.
 
-Sessions are namespaced by the authenticated client ID, so reusing a Claude
-session ID on two enrolled machines does not join their routing state. Responses
-are returned only on the HTTP connection that made the request; Jaynshare has no
-endpoint for one client to retrieve another client's response.
+Sessions are keyed by the authenticated client together with Claude Code's
+session id, so the same session id on two enrolled machines does not share
+routing state. A response is returned only on the connection that made the
+request; no endpoint lets one client retrieve another client's response.
 
-This is isolation of content in the current implementation, not isolation of
-resources or risk. All clients can consume shared quota. Their activity can
-change which account remains available for later requests and can contribute to
-provider rate limits, suspension, or termination affecting everyone. An
-operator can also switch the fleet's default account. Do not use one pool for
-people who should not share those consequences.
+This isolates content, not resources or risk. All clients consume shared quota;
+their activity changes which account stays available and can contribute to
+provider rate limits, suspension or termination affecting everyone. An
+operator can also move the pool's default account. Do not put people in one
+pool who should not share those consequences.
+
+## On the network
+
+Listeners bind only to loopback or private addresses (`10.0.0.0/8`,
+`172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7`); installation
+refuses anything else. A private address does not encrypt anything:
+
+- The forward proxy authenticates each client with a proxy credential in the
+  `CONNECT` request, which crosses the private network in clear. The request
+  content inside the tunnel is protected by the TLS session under the pool's
+  CA.
+- The base-URL listener carries the client's status reads, authenticated by
+  the client secret. Over plain HTTP the secret and everything the listener
+  answers cross the private network in clear; configure TLS on it
+  (`data_plane.tls_certificate_file` and `data_plane.tls_private_key_file`).
+
+Put the server on a network only its participants can reach, such as a
+tailnet, and filter ingress to the listener ports.
 
 ## Data handling and storage
 
-- **In memory:** Jaynshare buffers each complete request body so it can retry it
-  on another account. Responses are normally streamed. The process therefore
-  handles content in plaintext even when no body log is enabled.
-- **Provider credentials:** OAuth tokens and API keys are stored in the server
-  configuration, which the supported installer restricts to mode `0600` under a
-  dedicated unprivileged user. Clients receive neither those credentials nor
-  the server configuration.
-- **Client credentials:** each enrolled client gets a distinct secret. The
-  server stores only its SHA-256 hash. Client and operator credentials are
-  separate and can be rotated or revoked independently.
-- **Production audit log:** the supplied deployment records metadata—time,
-  duration, client ID, session ID, path, model, selected account, status, retry,
-  and error class—not prompt or response bodies. Files are created with mode
-  `0600` and rotate by size. This metadata can still be sensitive.
-- **Full body logging:** `logDir` and `--log-to` record request and response
-  bodies. They are off in the supplied deployment, and startup refuses to
-  combine them with the privacy audit log. If enabled manually, the files can
-  contain source code, prompts, outputs, and secrets present in message bodies;
-  treat them as highly sensitive.
-- **Activity views:** the TUI, optional activity log, and enrolled-client status
-  views contain routing and usage metadata, not message bodies.
-- **Telemetry:** the supplied deployment sets `eventLogging` to `block`, which
-  stops Claude Code event-logging requests at Jaynshare. This setting is not a
-  general content filter and makes no claim about data Anthropic receives in
-  ordinary model requests.
+- **In memory:** the server buffers each complete request body so it can retry
+  it on another account. Responses are streamed. The process handles content
+  in plaintext even when nothing is written to disk.
+- **Provider credentials:** OAuth tokens and API keys live in the server's state
+  file, written with mode `0600` under the dedicated service account. Clients
+  receive neither the credentials nor the configuration.
+- **Client credentials:** each enrolled client gets its own secret, disclosed
+  once. The server keeps only a SHA-256 digest of it. Client secrets and the
+  optional remote-operator secret are separate and can be rotated or revoked
+  independently.
+- **Audit log:** one record per exchange with metadata only: time, duration,
+  client, source address, session id, method, path without its query, model,
+  serving account, status, attempts, failover and error class. No body and no
+  credential. Files are owner-only and rotate by size. This metadata can still
+  be sensitive.
+- **Wire capture:** off by default. When the operator turns it on, the server
+  writes every exchange, bodies included, to a capture directory, with
+  credentials replaced by a placeholder. Those files can contain source code,
+  prompts, outputs and any secret present in a message: treat them as highly
+  sensitive. Capture cannot run unnoticed: every enrolled client's status shows
+  that it is on, and the audit log keeps running.
+- **Telemetry:** `data_plane.telemetry_policy = "block"` stops Claude Code's
+  event-logging requests at the server; the default, `forward`, relays them.
+  This is not a content filter and says nothing about what Anthropic receives
+  in ordinary model requests.
 
-Jaynshare does not provide per-client content retention controls, content-level
-access logs, encryption of request bodies from the operator, or a formal
-security certification. No independent security audit is claimed here.
+Jaynshare provides no per-client retention controls, no encryption of request
+bodies from the operator, and no formal security certification. No independent
+security audit is claimed.
 
 ## MITM scope
 
-The generated CA is added through `NODE_EXTRA_CA_CERTS` only to the Claude Code
-process launched by `jaynshare run` or `jaynshare-claude`; the supported setup
-does not install it in the operating system trust store. Jaynshare terminates
-TLS for the configured upstream host and a built-in, credential-free test host.
-Other HTTPS hosts requested through the forward proxy are blind tunnels, and
-Jaynshare continues to verify the real upstream certificate on its outbound
-connection.
+The pool's CA is handed only to the Claude Code process that `jaynshare
+claude` launches, through `NODE_EXTRA_CA_CERTS`. It enters the operating
+system's trust store only if the engineer runs `jaynshare trust-ca add`, which
+always asks first. The server terminates TLS only for `api.anthropic.com` and
+its own credential-free probe host; any other `CONNECT` target is relayed as
+an opaque tunnel, and a target that points back at the server itself is
+refused.
 
-That limited CA scope reduces the effect of accidental certificate trust. It
-does not stop a malicious server from changing traffic for the intercepted host
-or a malicious installer from changing the client configuration. Review the
-exact source revision and installation bundle you deploy.
+That narrow scope limits the effect of trusting the CA. It does not stop a
+malicious server from changing traffic for the intercepted host, or a tampered
+client kit from changing the client configuration. Releases and kits are
+signed; verify what you install (`jaynshare release verify`), and install only
+from a source you trust.
 
 ## Safer deployment checklist
 
-1. Use a dedicated, patched, unprivileged server account controlled by an
-   operator every participant trusts.
-2. Bind only to the private Tailscale address, restrict which identities can
-   reach the host, and never expose the proxy to the public internet.
-3. Give every person/device its own client credential. Never share the operator
-   credential; revoke both the Jaynshare credential and network access when a
-   client leaves.
-4. Keep `logDir` disabled. Define a retention and access policy for metadata
-   audit logs, and tell users exactly what is retained.
-5. Review and pin updates. The supported production setup disables automatic
-   updates; rerun the deployment preflight after each change.
-6. Do not route material whose owner has not approved disclosure to the server
-   operator, the selected provider account, and Anthropic (or the configured
-   backend). Keep unrelated production secrets out of prompts and repositories.
-7. Use API-backed or organization-managed credentials when those arrangements
-   fit the use case, and separately review the applicable provider terms.
+1. Run the server under its dedicated, unprivileged service account, on a host
+   controlled by an operator every participant trusts.
+2. Bind to a private address, restrict which people and devices can reach it,
+   and never expose the listeners to the public internet.
+3. Configure TLS on the base-URL listener.
+4. Give every person and device its own client. Never share the
+   remote-operator secret; revoke the client and remove its network access
+   when someone leaves.
+5. Keep wire capture off. Define a retention and access policy for the audit
+   log, and tell participants what is kept.
+6. Update deliberately, from verified releases; rerun `jaynshare server
+   preflight` after each change to the host.
+7. Do not route material whose owner has not approved disclosure to the server
+   operator, the serving account, and Anthropic. Keep unrelated production
+   secrets out of prompts and repositories.
+8. Where API-backed or organisation-managed credentials fit the use case,
+   prefer them, and review the provider terms that apply.
 
 Report suspected vulnerabilities privately as described in
 [the security policy](../SECURITY.md).

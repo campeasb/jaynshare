@@ -1,0 +1,190 @@
+#!/bin/sh
+# LinuxBox's fake systemctl: records every call and
+# keeps unit state under /run/fake-systemd; `start` runs the unit's real
+# ExecStart as its User= with its WorkingDirectory=, UMask= and Environment=.
+#
+# A scenario scripts one failure with `touch /run/fake-systemd/fail/<step>`
+# (one-shot: the file is removed when it fires):
+#   load     daemon-reload fails
+#   start    start/restart fails and the unit is `failed`
+#   health   start "succeeds" but runs `sleep` instead of ExecStart, so the
+#            service never answers its status check
+#   manager  every call fails as if systemd were not PID 1 (persistent)
+#   <verb>   that verb fails (enable, disable, stop, …)
+#
+# Answers: daemon-reload, enable, disable, start, stop, restart, is-active,
+# is-enabled, show <unit> [-p A,B | --property=A,B] [--value], cat <unit>.
+set -u
+state=/run/fake-systemd
+mkdir -p "$state/units" "$state/enabled" "$state/active" "$state/fail"
+printf '%s\n' "$*" >> "$state/calls"
+
+if [ -e "$state/fail/manager" ]; then
+  echo "System has not been booted with systemd as init system (PID 1). Can't operate." >&2
+  exit 1
+fi
+
+fires() {
+  if [ -e "$state/fail/$1" ]; then rm -f "$state/fail/$1"; return 0; fi
+  return 1
+}
+
+# The unit's key from its loaded copy; the last assignment wins.
+key() {
+  sed -n "s/^$2=//p" "$state/units/$1" | tail -n 1
+}
+
+pid_of() { cat "$state/active/$1" 2>/dev/null; }
+
+running() {
+  pid=$(pid_of "$1")
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+start_unit() {
+  unit=$1
+  if [ ! -f "$state/units/$unit" ]; then
+    echo "Failed to start $unit: Unit $unit not found." >&2
+    return 5
+  fi
+  if running "$unit"; then return 0; fi
+  if fires start; then
+    echo failed > "$state/result-$unit"
+    echo "Job for $unit failed because the control process exited with error code." >&2
+    return 1
+  fi
+  user=$(key "$unit" User); group=$(key "$unit" Group)
+  dir=$(key "$unit" WorkingDirectory); mask=$(key "$unit" UMask)
+  exec_start=$(key "$unit" ExecStart)
+  # Environment="K=V" lines, unquoted (the fixture's paths hold no space).
+  envs=$(sed -n 's/^Environment=//p' "$state/units/$unit" | sed 's/^"//; s/"$//' | tr '\n' ' ')
+  if fires health; then exec_start="sleep 86400"; fi
+  : "${user:=root}" "${group:=$user}" "${dir:=/}" "${mask:=0022}"
+  # systemd sets these for a User= service from its passwd entry.
+  home=$(getent passwd "$user" | cut -d: -f6)
+  (
+    cd "$dir" || exit 200
+    umask "$mask"
+    # ExecStart's words, with systemd's double-quote grouping.
+    eval "set -- $exec_start"
+    # shellcheck disable=SC2086
+    exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="${home:-/}" USER="$user" LOGNAME="$user" $envs \
+      setpriv --reuid="$user" --regid="$group" --clear-groups -- "$@" \
+      >> "$state/journal-$unit" 2>&1 < /dev/null
+  ) &
+  echo $! > "$state/active/$unit"
+  rm -f "$state/result-$unit" "$state/stopped-$unit"
+  return 0
+}
+
+stop_unit() {
+  unit=$1
+  if running "$unit"; then
+    pid=$(pid_of "$unit")
+    kill -TERM "$pid" 2>/dev/null
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -KILL "$pid" 2>/dev/null
+  fi
+  rm -f "$state/active/$unit"
+  touch "$state/stopped-$unit"
+}
+
+# ActiveState / SubState from what the fake knows.
+active_state() {
+  unit=$1
+  if running "$unit"; then echo active; return; fi
+  if [ -e "$state/result-$unit" ]; then echo failed; return; fi
+  if [ -e "$state/active/$unit" ] && [ ! -e "$state/stopped-$unit" ]; then
+    # It was started and its process is gone without a stop.
+    echo failed; return
+  fi
+  echo inactive
+}
+
+verb=${1:-}
+[ $# -gt 0 ] && shift
+# Global options before the verb (e.g. --no-pager, --quiet) are ignored.
+while [ "${verb#-}" != "$verb" ] && [ $# -gt 0 ]; do verb=$1; shift; done
+
+case "$verb" in
+  daemon-reload)
+    if fires load || fires daemon-reload; then
+      echo "Failed to reload daemon: Access denied" >&2; exit 1
+    fi
+    rm -f "$state/units/"*
+    for f in /etc/systemd/system/*.service; do
+      [ -f "$f" ] && cp "$f" "$state/units/"
+    done
+    exit 0 ;;
+  enable|disable)
+    for unit in "$@"; do
+      case "$unit" in -*) continue ;; esac
+      if fires "$verb"; then echo "Failed to $verb unit $unit." >&2; exit 1; fi
+      if [ "$verb" = enable ]; then
+        [ -f "$state/units/$unit" ] || { echo "Failed to enable unit: Unit file $unit does not exist." >&2; exit 1; }
+        touch "$state/enabled/$unit"
+      else
+        rm -f "$state/enabled/$unit"
+      fi
+    done
+    exit 0 ;;
+  start|restart)
+    for unit in "$@"; do
+      case "$unit" in -*) continue ;; esac
+      [ "$verb" = restart ] && stop_unit "$unit"
+      # `fail/restart` fails a restart only; `fail/start` (in start_unit)
+      # fails either verb.
+      if [ "$verb" = restart ] && fires restart; then
+        echo "Job for $unit failed." >&2; echo failed > "$state/result-$unit"; exit 1
+      fi
+      start_unit "$unit" || exit $?
+    done
+    exit 0 ;;
+  stop)
+    for unit in "$@"; do
+      case "$unit" in -*) continue ;; esac
+      if fires stop; then echo "Failed to stop $unit." >&2; exit 1; fi
+      stop_unit "$unit"
+    done
+    exit 0 ;;
+  is-active)
+    s=$(active_state "$1"); echo "$s"
+    [ "$s" = active ] && exit 0 || exit 3 ;;
+  is-enabled)
+    if [ -e "$state/enabled/$1" ]; then echo enabled; exit 0; fi
+    if [ -f "$state/units/$1" ]; then echo disabled; exit 1; fi
+    echo "Failed to get unit file state for $1: No such file or directory" >&2; exit 1 ;;
+  cat)
+    [ -f "$state/units/$1" ] || { echo "No files found for $1." >&2; exit 1; }
+    cat "$state/units/$1"; exit 0 ;;
+  show)
+    unit=""; props="LoadState,ActiveState,SubState,UnitFileState"; value=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -p|--property) props=$2; shift ;;
+        --property=*) props=${1#--property=} ;;
+        --value) value=1 ;;
+        -*) ;;
+        *) unit=$1 ;;
+      esac
+      shift
+    done
+    if [ -f "$state/units/$unit" ]; then load=loaded; else load=not-found; fi
+    act=$(active_state "$unit")
+    case "$act" in active) sub=running ;; failed) sub=failed ;; *) sub=dead ;; esac
+    if [ -e "$state/enabled/$unit" ]; then ufs=enabled; elif [ "$load" = loaded ]; then ufs=disabled; else ufs=""; fi
+    for p in $(echo "$props" | tr ',' ' '); do
+      case "$p" in
+        LoadState) v=$load ;; ActiveState) v=$act ;; SubState) v=$sub ;;
+        UnitFileState) v=$ufs ;; MainPID) v=$(pid_of "$unit"); v=${v:-0} ;;
+        *) v="" ;;
+      esac
+      if [ $value = 1 ]; then echo "$v"; else echo "$p=$v"; fi
+    done
+    exit 0 ;;
+  "")
+    echo "fake systemctl: no verb" >&2; exit 1 ;;
+  *)
+    echo "fake systemctl: unsupported verb $verb" >&2; exit 1 ;;
+esac
