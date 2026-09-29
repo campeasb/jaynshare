@@ -1,0 +1,5 @@
+# The build context carries only what the Dockerfile copies from the
+# repository root; the binary comes from the `bin` build context.
+*
+!LICENSE
+!NOTICE.md

@@ -1,116 +1,73 @@
-name: CI
-
+name: ci
 on:
-  workflow_dispatch:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-
+env:
+  CARGO_TERM_COLOR: always
 permissions:
   contents: read
-
+# A new push to a pull request cancels its older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  node:
-    name: node ${{ matrix.node }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Native type stripping needs Node 23.6+; package.json declares "node >=26".
-        node: [26]
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: rustup show
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --bins
+      - run: cargo build --locked --release
+      # The platform image builds in a docker-container BuildKit, as the
+      # release does (tools/release/build.py): the runner engine's embedded
+      # one ignores `COPY --chmod` on a copied directory.
+      - run: docker buildx create --name jaynshare-repro --driver docker-container --driver-opt network=host --use --bootstrap
+      - name: acceptance tests (against the release artefact)
+        run: cargo test --locked --release --test acceptance
+        env: { JAYNSHARE_BIN: target/release/jaynshare }
+  image:
+    timeout-minutes: 20
+    # The Linux release targets are musl: the platform image is built from
+    # `scratch`, which has no dynamic loader. Building here keeps the release
+    # artefact off anyone's laptop.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Node.js ${{ matrix.node }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-
-      # No package-lock.json is committed, so `npm ci` is not usable here.
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run tests
-        run: npm test
-
-      - name: Lint
-        if: matrix.node == 26
-        run: npm run lint
-
-  windows-client:
-    name: windows client ${{ matrix.node }}
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [26]
-    runs-on: windows-latest
-    defaults:
-      run:
-        # Git for Windows Bash, the only supported installation shell for the
-        # desktop client. Everything here runs against the native Windows Node
-        # that Claude Code itself uses, not WSL and not a container.
-        shell: bash
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Node.js ${{ matrix.node }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-
-      - name: Confirm this is native Windows Node under Git Bash
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: rustup target add x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: stage the binary per architecture
         run: |
-          uname -s
-          node -p 'process.platform'
-          test "$(node -p 'process.platform' | tr -d '\r')" = win32
-          command -v cygpath
-          command -v icacls.exe
-
-      # The platform-independent suite runs in the `node` job above, including
-      # the win32 code paths driven through JAYNSHARE_PLATFORM. What only a
-      # Windows runner can prove is the real thing: a Git Bash install into a
-      # throwaway profile, real NTFS access rules, native paths handed to native
-      # Node, and the shipped launcher and picker. The check needs no
-      # dependencies — this project has none at runtime.
-      #
-      # The synthetic secret it enrolls is not a credential for anything, and no
-      # Anthropic account is involved.
-      - name: Client install, launcher, and picker check
-        run: bash test-support/client-install-check.sh
-
-  nix:
-    name: nix package
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Flake check (package build + NixOS module VM test)
-        run: nix flake check --no-update-lock-file -L
-
-      - name: Smoke test the CLI wrapper
-        run: nix run --no-update-lock-file .#jaynshare -- help
-
-  # Single stable status check for branch protection to require, independent of
-  # how many implementation jobs run. Always runs and fails explicitly if any
-  # required job did not succeed (so it is never silently "skipped").
-  test:
-    name: test
-    needs: [node, windows-client, nix]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check job results
-        if: needs.node.result != 'success' || needs.windows-client.result != 'success' || needs.nix.result != 'success'
+          mkdir -p oci/amd64
+          cp target/x86_64-unknown-linux-musl/release/jaynshare oci/amd64/
+      - name: build the platform image
         run: |
-          echo "Node job result: ${{ needs.node.result }}"
-          echo "Windows client result: ${{ needs.windows-client.result }}"
-          echo "Nix package result: ${{ needs.nix.result }}"
-          exit 1
-      - run: echo "All required jobs passed"
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          docker build --build-context bin=oci \
+            --build-arg "VERSION=$version" \
+            --build-arg "COMMIT=$GITHUB_SHA" \
+            -f Dockerfile -t jaynshare:ci .
+      - name: the image holds exactly the four permitted files
+        run: |
+          # docker export injects its own runtime files (resolv.conf, hosts,
+          # hostname, mtab, .dockerenv, dev/console) into the created container.
+          # They are not image layers, so the check is about what remains.
+          docker create --name probe jaynshare:ci
+          docker export probe | tar -t | grep -v '/$' \
+            | grep -vE '^(\.dockerenv|dev/console|etc/(hostname|hosts|mtab|resolv\.conf))$' \
+            | sort > /tmp/files.txt
+          docker rm probe
+          cat /tmp/files.txt
+          diff <(printf 'LICENSE\nNOTICE.md\netc/ssl/certs/ca-certificates.crt\nusr/local/bin/jaynshare\n') /tmp/files.txt
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2

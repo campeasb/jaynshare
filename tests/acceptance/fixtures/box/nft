@@ -1,0 +1,19 @@
+#!/bin/sh
+# LinuxBox's fake nft: records every call; `nft -j list ruleset`
+# (and `nft --json list ruleset`) prints /run/fake-nft/ruleset.json, which the
+# scenario writes. `touch /run/fake-nft/fail` makes every call fail.
+set -u
+state=/run/fake-nft
+mkdir -p "$state"
+printf '%s\n' "$*" >> "$state/calls"
+if [ -e "$state/fail" ]; then
+  echo "netlink: Error: cache initialization failed: Operation not permitted" >&2
+  exit 1
+fi
+case " $* " in
+  *" list ruleset "*)
+    if [ -f "$state/ruleset.json" ]; then cat "$state/ruleset.json"; else echo '{"nftables":[]}'; fi
+    exit 0 ;;
+esac
+echo "fake nft: unsupported: $*" >&2
+exit 1

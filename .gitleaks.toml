@@ -1,0 +1,3 @@
+[allowlist]
+description = "Non-production TLS fixture keys used only by acceptance tests"
+paths = ['''^tests/acceptance/fixtures/tls/test-(leaf|other)-key\.pem$''']

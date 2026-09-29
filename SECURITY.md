@@ -1,47 +1,26 @@
 # Security policy
 
-For the product's trust boundaries, operator capabilities, client-to-client
-isolation, logging behavior, and safer deployment guidance, read the
+For what the server can see, what one participant can learn about another,
+and safer deployment guidance, read the
 [security and privacy model](docs/security-and-privacy.md). In particular,
 Jaynshare is a trusted intermediary: the server can read and alter routed
 traffic, and is not a security boundary against its operator.
 
-## Reporting a vulnerability
-
-Report suspected vulnerabilities privately through GitHub's **Security** tab on
-this repository — *Report a vulnerability* — which opens a private advisory
-visible only to the maintainers.
-
-Please do not open a public issue, and do not include secrets, tokens, prompts,
-audit records or infrastructure addresses in a report. A description of the
-weakness and how to reach it is enough; we will ask if we need more.
-
 ## Supported versions
 
-Jaynshare is developed on `main`. Fixes land there; there is no long-term
-support branch for older releases.
+Only the latest release receives security fixes.
 
-## Installation integrity
+## Reporting a vulnerability
 
-The supported installation path is a reviewed commit of this repository, or its
-matching release archive and SHA-256 checksum. The inherited npm updater is
-disabled in the documented server deployment: production updates are deliberate,
-reviewed imports followed by tests and a pinned release. Third-party archives
-and automatic updates from unreviewed registry packages are not supported.
+Report suspected vulnerabilities privately through this repository's
+**Security** tab — *Report a vulnerability* — which opens a private advisory
+visible only to the maintainers.
 
-## If a credential is exposed
+Do not open a public issue, and do not include secrets, tokens, prompts,
+audit records or infrastructure addresses in a report. A description of the
+weakness, the affected version or commit, and how to reach it is enough; we
+will ask if we need more.
 
-Jaynshare holds long-lived Claude credentials, so exposure has a defined
-response:
-
-- **Client secret** — rotate or revoke that client immediately and replace only
-  the affected machine's secret. Other clients are unaffected.
-- **Operator secret** — rotate the operator credential; it is the only one that
-  can mutate server state.
-- **OAuth credentials** — revoke the affected Claude session, remove the account
-  from service, and enroll it again only once the host is trusted.
-
-## Attribution
-
-Jaynshare is derived from TeamClaude and retains its MIT license and
-attribution; see [NOTICE.md](NOTICE.md).
+Reports are answered on a best-effort basis: no response or fix deadline is
+guaranteed. Please keep a report confidential until a fix is released; credit
+is given if you want it.

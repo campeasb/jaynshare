@@ -1,93 +1,178 @@
 # Jaynshare
 
-Share your claude subscriptions!
+You can share your Claude subscriptions!
 
-Jaynshare is a self-hosted, quota-aware router for Claude Code. It pools
-multiple Claude accounts behind one private service, rotates away from
-exhausted or unhealthy accounts, and lets enrolled macOS and Windows clients
-see fleet availability without receiving the server's credentials.
+Jaynshare is a self-hosted proxy for Claude Code (or third party hosted if you
+have trust to spare). After hosting a server, connecting several accounts to it
+and enrolling a client, replace `claude` by `jaynshare claude` and you will be
+able to choose from which account to draw for your session.
+
+Server works on Linux and Docker, client works on macOs and Windows.
 
 > [!WARNING]
 > Pooling Claude subscriptions conflicts with Anthropic's published terms and can
 > lead to suspension or termination of every account involved, without a refund.
 > Whether a particular deployment also raises legal issues depends on its facts
 > and jurisdiction; this project does not claim that it is legal or authorized.
-> Read the [subscription-sharing risk summary](is_this_safe.md),
-> [security and privacy model](docs/security-and-privacy.md), and
-> [compliance notes](docs/compliance.md) before deploying.
+> Read the [subscription-sharing risk summary](is_this_safe.md), the
+> [security and privacy model](docs/security-and-privacy.md), and the
+> [operator obligations](deploy/README-server.md) before deploying.
 
-> [!IMPORTANT]
-> Jaynshare is a trusted intermediary, not an end-to-end encrypted relay. The
-> server receives prompts, code context, tool results, and model responses in
-> plaintext so it can route and retry them. A server operator—or anyone who
-> compromises the server—can read or alter that traffic. Only use a server whose
-> operator and deployed code you trust.
-
-## short demo
+## Short demo
 
 <img width="900" height="575" alt="demo-2" src="https://github.com/user-attachments/assets/e68a0565-4ff2-40c0-96ef-2ae2408603aa" />
 
+This demo was v1.
+Pretty much still the same but v2 is now in Rust and CC config changes are less invasive.
+
+## Purpose and disclaimers
+
+This is a project by Jayn Labs started by my friend and I cause we were sick of
+getting rate limited while the other had plenty leftover quota.
+
+PLEASE, yes this was GREATLY done with AI. No matter your opinion on the matter,
+feel free to give us feedback. Reworking everything from the ground up is not
+something frightening us. So truly feel free to give any feedback (even to roast
+us), as long as it helps us improve.
+
+Oh, and yes, we've seen Team Claude on github. We were inspired by their
+project. To be fair, our v1 was mostly a fork of their code, that's why we've
+done v2 in Rust to make this codebase our own and not just a fancy fork.
+
+This was not made by, endorsed by, or affiliated with Anthropic; Claude Code is
+a product of Anthropic.
+
+> [!IMPORTANT]
+> Jaynshare is a "trusted" intermediary, not an E2E encrypted relay. The
+> server receives EVERYTHING in plaintext so it can route and retry them.
+> A server operator—or anyone who compromises the server—can read or alter
+> that traffic. Only use a server whose operator and deployed code you trust.
+
 ## Highlights
 
-- OAuth and API-key accounts with quota-aware failover
-- Priority, per-model, and session-aware routing
-- Interactive terminal UI plus headless operation
-- Private client enrollment for macOS and native Windows
-- Tailscale-oriented deployment, audit logging, and credential revocation
-- Strict TypeScript with no runtime npm dependencies
+- OAuth subscription and API-key accounts
+- An account picker at launch and a Claude Code status line naming the serving
+  account
+- Private client enrollment for macOS and Windows, with a secret per client,
+  rotation and revocation
+- Private-network listeners only, optional TLS, and an audit log that never
+  holds a body or a credential
+- Signed releases, a native systemd install and a rootless Docker Compose kit
+- One Rust binary for the server and the client
 
-## Requirements
+## Requirements for self hosting
 
-- Node.js 26+
-- Linux with systemd for the hosted server deployment
-- Tailscale for remote client access
-- Git Bash for Windows clients
+- A Linux server with systemd, or rootless Docker Engine 28 (or newer) for the
+  Compose kit
+- A private network between the engineers and the server, such as a tailnet
+  (but I'm sure you can make it work with other clever solutions)
+- Claude Code already installed on each engineer's machine
 
 ## Quick start
 
-For a local development instance:
+### Server
+
+From the [releases page](https://github.com/jaynlabs/jaynshare/releases),
+download and extract the archive for the server's platform, and download the
+client kit (`jaynshare-2.0.0-client-kit.zip`) beside it. As root, in the
+extracted directory:
 
 ```sh
-git clone https://github.com/jaynlabs/jaynshare.git
-cd jaynshare
-npm install
-node src/index.ts login --oauth --name primary
-node src/index.ts server
+./jaynshare release fetch 2.0.0 --out ./release
+./jaynshare config new --out ./jaynshare.toml
+$EDITOR ./jaynshare.toml
+./jaynshare server preflight --config ./jaynshare.toml --from ./release
+./jaynshare server install --config ./jaynshare.toml --from ./release
 ```
 
-In another terminal:
+The install puts `jaynshare` on the search path. Operator commands run on the
+server as its service account:
 
 ```sh
-node src/index.ts run
+alias js='sudo -u jaynshare -H jaynshare'
+js account login --name alice
+js status
+
+# One engineer's enrollment bundle:
+sudo install -m 0600 -o jaynshare -g jaynshare \
+  ../jaynshare-2.0.0-client-kit.zip /var/lib/jaynshare/client-kit.zip
+sudo install -d -m 0700 -o jaynshare -g jaynshare /var/lib/jaynshare/bundles
+js client enrol bob --name "Bob" \
+  --kit /var/lib/jaynshare/client-kit.zip --out /var/lib/jaynshare/bundles
 ```
 
-The first command creates `~/.config/jaynshare.json`. Review it before use. For
-a private multi-machine installation, follow the [deployment guide](docs/deployment.md).
+`client enrol` writes the enrollment bundle and discloses its one-time code
+once. Send the two through separate private channels.
+
+The [server installation notes](deploy/README-server.md) cover the operator
+trust boundary, the decision record every pooled account needs, and the
+private-network rules Jaynshare cannot enforce for you. The Compose kit in each
+release carries its own instructions.
+
+### Engineer
+
+1. Extract the enrollment bundle from your operator into an empty directory.
+2. Run its installer with the one-time code sent through a separate channel.
+3. Run `jaynshare claude` wherever you would have run `claude`.
+
+`jaynshare claude` opens a picker when the pool cannot choose for you;
+`--account <name>` names the account, `--auto` lets the pool pick, and
+`--direct` runs Claude Code outside the pool under your own login. Arguments
+after `--` go to Claude Code unchanged. `jaynshare status` checks enrollment
+and connectivity, and `jaynshare alias` prints a shell alias so that `claude`
+itself goes through the pool. The bundle's `README.txt` documents installation
+in detail.
+
+## Roadmap / Ideas
+
+- [x] Rust v2
+- [ ] `jaynshare codex`
+- [ ] API-key subscriptions from other providers, like OpenCode Go
+- [ ] Account features (settings, plugins, skills, MCP servers) when you draw
+      from your own account (the pool refuses them for everyone today)
+- [ ] Owner limits: cap what the pool draws from you, and pause it yourself
+- [ ] Draw credits: what you can draw from others' accounts follows what you
+      give the pool
+- [ ] Linux client installer
 
 ## Documentation
 
-- [Deployment and client enrollment](docs/deployment.md)
+- [Is subscription sharing safe?](is_this_safe.md)
 - [Security and privacy model](docs/security-and-privacy.md)
-- [Usage and CLI reference](docs/usage.md)
-- [Configuration](docs/configuration.md)
-- [Accounts](docs/accounts.md)
-- [Routing](docs/routing.md)
-- [Quota behavior](docs/quota.md)
-- [Proxy modes](docs/proxy-modes.md)
-- [Windows client internals](docs/windows-client.md)
-- [Nix](nix/README.md)
+- [Server installation and operator obligations](deploy/README-server.md)
+- [Release tooling](tools/release/README.md)
+- `jaynshare help` and `jaynshare help <verb>`: every verb, its options, exit
+  codes and examples
 
 ## Development
 
+Rust 1.95 (`rust-toolchain.toml` pins it). Nothing in the build or the tests
+needs credentials or network access to Anthropic.
+
 ```sh
-npm install
-npm test
-npm run lint
+cargo build --release
+cargo test --bins                      # unit tests
+JAYNSHARE_BIN=target/release/jaynshare cargo test --release --test acceptance
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report
-security issues privately as described in [SECURITY.md](SECURITY.md).
+CI runs the above and the platform image build; see
+`.github/workflows/ci.yml`. The acceptance tests that need Linux run in Docker
+and are skipped where no Docker daemon answers.
+
+Where things live:
+
+- `src/` — the server, the client and the CLI
+- `deploy/` — the reference Compose deployment, the server notes, the release
+  key (`release-key.pub`) and the client-kit installers (`kit/`)
+- `tools/release/` — cross-builds, packaging, signing and publishing
+- `Dockerfile` — the minimal platform image
+
+Issues and pull requests are welcome; open an issue before a large change.
+Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT, © Jayn Labs. See [LICENSE](LICENSE), and [NOTICE.md](NOTICE.md) for the
+Rust crates Jaynshare links.
