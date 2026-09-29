@@ -1,8 +1,8 @@
-# Jaynshare
+# jaynshare
 
 You can share your Claude subscriptions!
 
-Jaynshare is a self-hosted proxy for Claude Code (or third party hosted if you
+jaynshare is a self-hosted proxy for Claude Code (or third party hosted if you
 have trust to spare). After hosting a server, connecting several accounts to it
 and enrolling a client, replace `claude` by `jaynshare claude` and you will be
 able to choose from which account to draw for your session.
@@ -43,7 +43,7 @@ This was not made by, endorsed by, or affiliated with Anthropic; Claude Code is
 a product of Anthropic.
 
 > [!IMPORTANT]
-> Jaynshare is a "trusted" intermediary, not an E2E encrypted relay. The
+> jaynshare is a "trusted" intermediary, not an E2E encrypted relay. The
 > server receives EVERYTHING in plaintext so it can route and retry them.
 > A server operator—or anyone who compromises the server—can read or alter
 > that traffic. Only use a server whose operator and deployed code you trust.
@@ -106,7 +106,7 @@ once. Send the two through separate private channels.
 
 The [server installation notes](deploy/README-server.md) cover the operator
 trust boundary, the decision record every pooled account needs, and the
-private-network rules Jaynshare cannot enforce for you. The Compose kit in each
+private-network rules jaynshare cannot enforce for you. The Compose kit in each
 release carries its own instructions.
 
 ### Engineer
