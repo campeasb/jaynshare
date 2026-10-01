@@ -1,13 +1,33 @@
-# jaynshare
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/jaynshare-dark.svg">
+    <img src="docs/assets/jaynshare-light.svg" width="254" height="64" alt="jaynshare">
+  </picture>
+</p>
 
-You can share your Claude subscriptions!
+<p align="center">
+  <b>You can share your Claude subscriptions!</b><br>
+  <sub>Self-hosted · Linux &amp; Docker server · macOS &amp; Windows client</sub>
+</p>
+
+<p align="center">
+  <a href="https://github.com/jaynlabs/jaynshare/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/jaynlabs/jaynshare/ci.yml?branch=main&label=ci"></a>
+  <a href="https://github.com/jaynlabs/jaynshare/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jaynlabs/jaynshare"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/jaynlabs/jaynshare"></a>
+  <img alt="Rust 1.95" src="https://img.shields.io/badge/rust-1.95-orange">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="is_this_safe.md">Is this safe?</a> ·
+  <a href="https://jayn.app/jaynshare">Website</a>
+</p>
 
 jaynshare is a self-hosted proxy for Claude Code (or third party hosted if you
 have trust to spare). After hosting a server, connecting several accounts to it
 and enrolling a client, replace `claude` by `jaynshare claude` and you will be
 able to choose from which account to draw for your session.
-
-Server works on Linux and Docker, client works on macOs and Windows.
 
 > [!WARNING]
 > Pooling Claude subscriptions conflicts with Anthropic's published terms and can
