@@ -362,7 +362,6 @@ fn state_write_failed<E: std::fmt::Debug>(server: &Server, error: MutateError<E>
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use http_body_util::Full;
@@ -375,11 +374,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::audit::AuditLog;
-    use crate::config::LoadedConfig;
-    use crate::data_plane::upstream::Upstream;
-    use crate::pool::Pool;
-    use crate::state::State;
+
     fn family(now: OffsetDateTime) -> OAuthCredential {
         OAuthCredential {
             access_token: Secret::new("access".into()),
@@ -435,36 +430,11 @@ mod tests {
         (addr, hit)
     }
 
-    fn test_server(addr: std::net::SocketAddr) -> Server {
-        let dir = std::env::temp_dir().join(format!("jaynshare-refresh-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("test dir");
-        let document = format!("version = 1\n[data_plane]\nupstream_origin = \"http://{addr}\"\n");
-        let mut config =
-            crate::config::parse(document.as_bytes(), Path::new(".")).expect("test configuration");
-        config.storage.state_file = dir.join("state.json");
-        let loaded = LoadedConfig {
-            path: dir.join("config.toml"),
-            digest: String::new(),
-            config,
-        };
-        let audit = AuditLog::open(&dir.join("exchanges.ndjson"), &loaded.config.audit)
-            .expect("test audit log");
-        let upstream = Upstream::new(&loaded.config.data_plane).expect("test upstream");
-        Server::new(
-            loaded,
-            State::default(),
-            Pool::default(),
-            audit,
-            None,
-            upstream,
-        )
-    }
-
     /// A server whose one OAuth account's token call is answered by a local
     /// responder after a delay; `hit` fires when the call reached it.
     async fn stale_run_fixture() -> (Arc<Server>, Uuid, Arc<Notify>) {
         let (addr, hit) = token_responder(std::time::Duration::from_millis(300)).await;
-        let server = Arc::new(test_server(addr));
+        let server = Arc::new(Server::for_tests(addr));
         let handle = {
             let mut pool = server.pool.lock().expect("pool lock");
             pool.add(account(OffsetDateTime::now_utc()), None)
