@@ -583,7 +583,8 @@ fn host_target() -> &'static str {
 }
 
 /// `release fetch` (the explicit release-host contact): the four files come from the named mirror and nothing
-/// else is requested; a mirror that is not plain `https` is a usage error; a
+/// else is requested; a redirect is followed only within the mirror's host; a
+/// mirror that is not plain `https` is a usage error; a
 /// tampered archive is a release failure; a stopped host is unreachable.
 #[tokio::test(flavor = "multi_thread")]
 async fn release_fetch_contacts_only_the_named_origin() {
@@ -616,10 +617,13 @@ async fn release_fetch_contacts_only_the_named_origin() {
     let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let served_dir = std::sync::Arc::new(std::sync::Mutex::new(served.clone()));
     let requests = std::sync::Arc::new(AtomicUsize::new(0));
+    // When set, `/v<version>/<name>` answers 302 to `https://<this>/assets/<name>`.
+    let redirect_to: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
     tokio::spawn({
         let seen = seen.clone();
         let served_dir = served_dir.clone();
         let requests = requests.clone();
+        let redirect_to = redirect_to.clone();
         async move {
             loop {
                 let Ok((plain, _)) = listener.accept().await else {
@@ -631,16 +635,29 @@ async fn release_fetch_contacts_only_the_named_origin() {
                 let seen = seen.clone();
                 let served_dir = served_dir.clone();
                 let requests = requests.clone();
+                let redirect_to = redirect_to.clone();
                 tokio::spawn(async move {
                     let service = service_fn(move |request: Request<_>| {
                         let seen = seen.clone();
                         let served_dir = served_dir.clone();
                         let requests = requests.clone();
+                        let redirect_to = redirect_to.clone();
                         async move {
                             requests.fetch_add(1, AtomicOrdering::SeqCst);
                             let path = request.uri().path().to_string();
                             seen.lock().expect("seen").push(path.clone());
                             let name = path.split('/').nth(2).unwrap_or("");
+                            let redirect = redirect_to.lock().expect("redirect").clone();
+                            if let Some(authority) = redirect.filter(|_| path.starts_with("/v")) {
+                                return Ok(Response::builder()
+                                    .status(http::StatusCode::FOUND)
+                                    .header(
+                                        http::header::LOCATION,
+                                        format!("https://{authority}/assets/{name}"),
+                                    )
+                                    .body(Full::new(Bytes::new()))
+                                    .expect("redirect"));
+                            }
                             let (status, bytes) =
                                 match fs::read(served_dir.lock().expect("served").join(name)) {
                                     Ok(bytes) => (http::StatusCode::OK, bytes),
@@ -724,6 +741,48 @@ async fn release_fetch_contacts_only_the_named_origin() {
     let mut got = requested.clone();
     got.sort();
     assert_eq!(got, wanted, "only the release set was requested");
+
+    // GitHub answers every asset with a redirect: one within the mirror's
+    // host is followed; one to another host fails without contacting it.
+    let fetch = |out: &std::path::Path| {
+        cli_raw(
+            &[
+                "release",
+                "fetch",
+                FIXTURE_VERSION,
+                "--out",
+                out.to_str().expect("out path"),
+                "--release-origin",
+                &origin,
+                "--tls-ca",
+                CA_PEM,
+            ],
+            &env,
+            None,
+        )
+    };
+    *redirect_to.lock().expect("redirect") = Some(format!("localhost:{}", addr.port()));
+    let out = root.join("out-redirected");
+    let (code, stdout, stderr) = fetch(&out);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    for name in &expected {
+        assert_eq!(
+            fs::read(out.join(name)).expect("fetched bytes"),
+            fs::read(release.join(name)).expect("served bytes"),
+            "{name} arrives byte-for-byte through the redirect"
+        );
+    }
+    *redirect_to.lock().expect("redirect") = Some(format!("127.0.0.1:{}", addr.port()));
+    seen.lock().expect("seen").clear();
+    let (code, stdout, stderr) = fetch(&root.join("out-foreign"));
+    assert_eq!(code, 17, "{stdout}{stderr}");
+    let requested = seen.lock().expect("seen").clone();
+    assert_eq!(
+        requested,
+        [format!("/v{FIXTURE_VERSION}/release.json")],
+        "the foreign redirect target is never contacted"
+    );
+    *redirect_to.lock().expect("redirect") = None;
 
     // A mirror that is not plain https with no user information, query or
     // fragment is a usage error, and contacts nothing.

@@ -74,11 +74,11 @@ a product of Anthropic.
 
 From the [releases page](https://github.com/jaynlabs/jaynshare/releases),
 download and extract the archive for the server's platform, and download the
-client kit (`jaynshare-2.0.0-client-kit.zip`) beside it. As root, in the
+client kit (`jaynshare-2.0.1-client-kit.zip`) beside it. As root, in the
 extracted directory:
 
 ```sh
-./jaynshare release fetch 2.0.0 --out ./release
+./jaynshare release fetch 2.0.1 --out ./release
 ./jaynshare config new --out ./jaynshare.toml
 $EDITOR ./jaynshare.toml
 ./jaynshare server preflight --config ./jaynshare.toml --from ./release
@@ -95,7 +95,7 @@ js status
 
 # One engineer's enrollment bundle:
 sudo install -m 0600 -o jaynshare -g jaynshare \
-  ../jaynshare-2.0.0-client-kit.zip /var/lib/jaynshare/client-kit.zip
+  ../jaynshare-2.0.1-client-kit.zip /var/lib/jaynshare/client-kit.zip
 sudo install -d -m 0700 -o jaynshare -g jaynshare /var/lib/jaynshare/bundles
 js client enrol bob --name "Bob" \
   --kit /var/lib/jaynshare/client-kit.zip --out /var/lib/jaynshare/bundles

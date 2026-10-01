@@ -21,6 +21,12 @@ use crate::bundle::{PinnedKey, canonical_json, sha256_hex};
 /// `v<v>/`, so an asset is `<origin>/v<version>/<artifact>`.
 pub const OFFICIAL_ORIGIN: &str = "https://github.com/jaynlabs/jaynshare/releases/download";
 
+/// The hosts the official origin redirects an asset download to.
+const OFFICIAL_ASSET_HOSTS: [&str; 2] = [
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+];
+
 /// The OCI registry repository.
 #[allow(dead_code)] // read by the container verbs; unused on some feature sets
 pub const OCI_REPOSITORY: &str = "ghcr.io/jaynlabs/jaynshare";
@@ -129,27 +135,57 @@ impl FetchFailure {
     }
 }
 
-async fn download(
-    client: &hyper_util::client::legacy::Client<
-        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-        Full<Bytes>,
-    >,
-    origin: &str,
-    version: &str,
+type ReleaseClient = hyper_util::client::legacy::Client<
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+    Full<Bytes>,
+>;
+
+async fn get(
+    client: &ReleaseClient,
+    url: &str,
     name: &str,
-) -> Result<Vec<u8>, FetchFailure> {
-    let url = format!("{origin}/v{version}/{name}");
-    let request = http::Request::get(&url)
+) -> Result<http::Response<hyper::body::Incoming>, FetchFailure> {
+    let request = http::Request::get(url)
         .body(Full::new(Bytes::new()))
         .map_err(|e| FetchFailure::Unreachable(format!("{name}: {e}")))?;
-    let response = tokio::time::timeout(DOWNLOAD_TIMEOUT, client.request(request))
+    tokio::time::timeout(DOWNLOAD_TIMEOUT, client.request(request))
         .await
         .map_err(|_| {
             FetchFailure::Unreachable(format!(
                 "{name}: the release host did not answer within {DOWNLOAD_TIMEOUT:?}"
             ))
         })?
-        .map_err(|e| FetchFailure::Unreachable(format!("{name}: {e}")))?;
+        .map_err(|e| FetchFailure::Unreachable(format!("{name}: {e}")))
+}
+
+/// The one redirect `download` follows: https to the origin's own host or,
+/// from the official origin, to GitHub's asset hosts. Anywhere else would be
+/// a connection the operator cannot explain (SEC-25).
+fn redirect_target(origin: &str, location: &str) -> Option<String> {
+    let origin_uri: http::Uri = origin.parse().ok()?;
+    let target: http::Uri = location.parse().ok()?;
+    let host = target.authority()?.as_str();
+    let own_host = origin_uri.authority().map(|a| a.as_str()) == Some(host);
+    let asset_host = origin == OFFICIAL_ORIGIN && OFFICIAL_ASSET_HOSTS.contains(&host);
+    (target.scheme_str() == Some("https") && (own_host || asset_host)).then(|| location.to_string())
+}
+
+async fn download(
+    client: &ReleaseClient,
+    origin: &str,
+    version: &str,
+    name: &str,
+) -> Result<Vec<u8>, FetchFailure> {
+    let mut response = get(client, &format!("{origin}/v{version}/{name}"), name).await?;
+    let redirect = response
+        .headers()
+        .get(http::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .filter(|_| response.status().is_redirection())
+        .and_then(|location| redirect_target(origin, location));
+    if let Some(target) = redirect {
+        response = get(client, &target, name).await?;
+    }
     let status = response.status();
     if !status.is_success() {
         return Err(FetchFailure::Status {
@@ -175,13 +211,7 @@ async fn download(
 /// .../releases/tag/v<semver>`), or `<origin>/latest` when the origin does
 /// not end in `download` — reading only the redirect target, never a body
 /// (a body could carry manifest-adjacent material).
-async fn latest_version(
-    client: &hyper_util::client::legacy::Client<
-        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-        Full<Bytes>,
-    >,
-    origin: &str,
-) -> Result<String, FetchFailure> {
+async fn latest_version(client: &ReleaseClient, origin: &str) -> Result<String, FetchFailure> {
     let name = "release latest";
     let url = if origin.ends_with("/download") {
         origin
@@ -191,17 +221,7 @@ async fn latest_version(
     } else {
         format!("{origin}/latest")
     };
-    let request = http::Request::get(&url)
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| FetchFailure::Unreachable(format!("{name}: {e}")))?;
-    let response = tokio::time::timeout(DOWNLOAD_TIMEOUT, client.request(request))
-        .await
-        .map_err(|_| {
-            FetchFailure::Unreachable(format!(
-                "{name}: the release host did not answer within {DOWNLOAD_TIMEOUT:?}"
-            ))
-        })?
-        .map_err(|e| FetchFailure::Unreachable(format!("{name}: {e}")))?;
+    let response = get(client, &url, name).await?;
     if !response.status().is_redirection() {
         return Err(FetchFailure::Unreachable(format!(
             "{name}: {} did not redirect to a release (status {})",
@@ -1126,6 +1146,58 @@ mod tests {
             assert!(
                 origin(Some(bad)).is_err(),
                 "the origin rule must reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_official_origin_redirects_to_the_github_asset_hosts() {
+        for host in OFFICIAL_ASSET_HOSTS {
+            let location = format!("https://{host}/github-production-release-asset/1?sig=x");
+            assert_eq!(
+                redirect_target(OFFICIAL_ORIGIN, &location),
+                Some(location.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn a_mirror_redirects_within_its_own_host() {
+        let location = "https://localhost:1/assets/release.json";
+        assert_eq!(
+            redirect_target("https://localhost:1/r", location),
+            Some(location.to_string())
+        );
+    }
+
+    #[test]
+    fn a_redirect_anywhere_else_is_not_followed() {
+        for (origin, location) in [
+            (OFFICIAL_ORIGIN, "https://evil.example.com/release.json"),
+            (
+                OFFICIAL_ORIGIN,
+                "http://release-assets.githubusercontent.com/release.json",
+            ),
+            (
+                OFFICIAL_ORIGIN,
+                "https://release-assets.githubusercontent.com@evil.example.com/x",
+            ),
+            (
+                OFFICIAL_ORIGIN,
+                "https://release-assets.githubusercontent.com:8443/x",
+            ),
+            (OFFICIAL_ORIGIN, "/relative/release.json"),
+            (
+                "https://localhost:1",
+                "https://release-assets.githubusercontent.com/x",
+            ),
+            ("https://localhost:1", "https://localhost:2/x"),
+            ("https://localhost:1", "https://user@localhost:1/x"),
+        ] {
+            assert_eq!(
+                redirect_target(origin, location),
+                None,
+                "{origin} must not follow {location}"
             );
         }
     }
