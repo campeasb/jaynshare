@@ -91,6 +91,9 @@ pub struct Server {
     /// The open-tunnel gauges and the counters since start.
     pub mitm: Arc<crate::mitm::counters::Counters>,
     carried: Mutex<State>,
+    /// Held from snapshot to rename by every state write, so writes land one
+    /// at a time and in snapshot order. Lock order: this, `pool`, `carried`.
+    state_write: Mutex<()>,
     quota_dirty: AtomicBool,
     /// When the fallback line was last written, per advisor model.
     advisor_fallback_logged: Mutex<HashMap<String, Instant>>,
@@ -139,10 +142,39 @@ impl Server {
                 accounts: Vec::new(),
                 ..state
             }),
+            state_write: Mutex::new(()),
             quota_dirty: AtomicBool::new(false),
             advisor_fallback_logged: Mutex::new(HashMap::new()),
             stop,
         }
+    }
+
+    /// A server over a fresh temporary directory, its upstream at `upstream`.
+    #[cfg(test)]
+    pub fn for_tests(upstream: std::net::SocketAddr) -> Self {
+        let dir = std::env::temp_dir().join(format!("jaynshare-server-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let document =
+            format!("version = 1\n[data_plane]\nupstream_origin = \"http://{upstream}\"\n");
+        let mut config = crate::config::parse(document.as_bytes(), std::path::Path::new("."))
+            .expect("test configuration");
+        config.storage.state_file = dir.join("state.json");
+        let loaded = LoadedConfig {
+            path: dir.join("config.toml"),
+            digest: String::new(),
+            config,
+        };
+        let audit = AuditLog::open(&dir.join("exchanges.ndjson"), &loaded.config.audit)
+            .expect("test audit log");
+        let upstream = Upstream::new(&loaded.config.data_plane).expect("test upstream");
+        Self::new(
+            loaded,
+            State::default(),
+            Pool::default(),
+            audit,
+            None,
+            upstream,
+        )
     }
 
     /// The configuration in force when the caller begins.
@@ -204,18 +236,17 @@ impl Server {
         &self,
         f: impl FnOnce(&mut Registry) -> Result<T, E>,
     ) -> Result<T, MutateError<E>> {
-        // The pool lock first, the same order `mutate_pool` uses.
-        let accounts = self.pool.lock().expect("pool lock").accounts().to_vec();
+        let _writing = self.state_write.lock().expect("state write lock");
+        let (accounts, organization_quota) = {
+            let pool = self.pool.lock().expect("pool lock");
+            (pool.accounts().to_vec(), pool.organisation_quota_records())
+        };
         let mut carried = self.carried.lock().expect("state lock");
         let mut candidate = Registry {
             clients: carried.clients.clone(),
             operator: carried.operator.clone(),
         };
         let out = f(&mut candidate).map_err(MutateError::Refused)?;
-        let organization_quota = {
-            let pool = self.pool.lock().expect("pool lock");
-            pool.organisation_quota_records()
-        };
         state::write(
             &self.state_path,
             &State {
@@ -266,6 +297,7 @@ impl Server {
         &self,
         f: impl FnOnce(&mut Pool) -> Result<T, E>,
     ) -> Result<T, MutateError<E>> {
+        let _writing = self.state_write.lock().expect("state write lock");
         let mut live = self.pool.lock().expect("pool lock");
         let mut candidate = live.clone();
         let out = f(&mut candidate).map_err(MutateError::Refused)?;
@@ -284,17 +316,14 @@ impl Server {
     /// reset expiry is written with them, request counters alone never
     /// dirty the file. A clean shutdown flushes through here too.
     pub fn flush_quota(&self) -> std::io::Result<()> {
-        let dirty = {
+        let _writing = self.state_write.lock().expect("state write lock");
+        let snapshot = {
             let mut pool = self.pool.lock().expect("pool lock");
             let expired = pool.expire_quota(OffsetDateTime::now_utc());
             let marked = self.quota_dirty.swap(false, Ordering::AcqRel);
-            expired || marked
-        };
-        if !dirty {
-            return Ok(());
-        }
-        let snapshot = {
-            let pool = self.pool.lock().expect("pool lock");
+            if !(expired || marked) {
+                return Ok(());
+            }
             self.durable_state(&pool)
         };
         state::write(&self.state_path, &snapshot)
@@ -306,5 +335,85 @@ impl Server {
             tracing::error!(event = "audit_write_failed", error = %e, "audit append failed; stopping admission");
             self.request_stop(Stop::Unwritable);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+
+    use super::*;
+    use crate::pool::{Account, Credential, Profile, Secret, Source};
+
+    const ROUNDS: usize = 50;
+
+    type Write = fn(&Server, usize) -> Result<(), String>;
+
+    /// Runs `write` ROUNDS times on its own thread and sends the first failure.
+    fn writer(server: &Arc<Server>, results: &mpsc::Sender<Result<(), String>>, write: Write) {
+        let (server, results) = (Arc::clone(server), results.clone());
+        thread::spawn(move || {
+            let _ = results.send((0..ROUNDS).try_for_each(|i| write(&server, i)));
+        });
+    }
+
+    fn api_key_account(i: usize) -> Account {
+        Account::new(
+            String::new(),
+            Profile::default(),
+            Source::ApiKeyEntry,
+            Credential::ApiKey(Secret::new(format!("sk-{i}"))),
+        )
+    }
+
+    /// Quota flushes, account adds and client enrolments all write the state
+    /// file; run at once, each succeeds and the file ends equal to the live state.
+    #[test]
+    fn concurrent_state_writes_all_succeed_and_the_last_one_is_current() {
+        let server = Arc::new(Server::for_tests(([127, 0, 0, 1], 9).into()));
+        let writes: [Write; 3] = [
+            |server, _| {
+                server.mark_quota_dirty();
+                server
+                    .flush_quota()
+                    .map_err(|e| format!("quota flush: {e}"))
+            },
+            |server, i| {
+                server
+                    .mutate_pool(|pool| pool.add(api_key_account(i), Some(format!("account-{i}"))))
+                    .map(drop)
+                    .map_err(|e| format!("account add: {e:?}"))
+            },
+            |server, i| {
+                server
+                    .mutate_registry(|registry| {
+                        registry.issue(
+                            &format!("client-{i}"),
+                            "Client",
+                            OffsetDateTime::now_utc(),
+                            600,
+                        )
+                    })
+                    .map(drop)
+                    .map_err(|e| format!("client enrol: {e:?}"))
+            },
+        ];
+        let (results, finished) = mpsc::channel();
+        for write in writes {
+            writer(&server, &results, write);
+        }
+
+        for _ in writes {
+            let result = finished
+                .recv_timeout(Duration::from_secs(60))
+                .expect("a writer deadlocked");
+            result.expect("every concurrent write succeeds");
+        }
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&server.state_path).expect("state file"))
+                .expect("state JSON");
+        let live = server.durable_state(&server.pool.lock().expect("pool lock"));
+        assert_eq!(on_disk, live.to_json());
     }
 }
