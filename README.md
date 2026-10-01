@@ -45,6 +45,12 @@ able to choose from which account to draw for your session.
 This demo was v1.
 Pretty much still the same but v2 is now in Rust and CC config changes are less invasive.
 
+## Quick Overview
+
+<img width="1368" height="956" alt="jayn" src="https://github.com/user-attachments/assets/9828c985-53d8-4fba-b0be-d89e9827cc63" />
+
+If reading the code or asking Claude to explain is too long for you, take a look at this figure for a basic understanding of how it works.
+
 ## Purpose and disclaimers
 
 This is a project by Jayn Labs started by my friend and I cause we were sick of
