@@ -10,9 +10,9 @@ use toml::{Table, Value};
 use super::platform;
 use super::{
     AccountSettings, AuditSettings, ClientSettings, Config, ConfigError, DEFAULT_LISTEN,
-    DEFAULT_MITM_LISTEN, DataPlaneSettings, Diagnostics, EgressMode, EgressSettings, LogLevel,
-    LoggingSettings, MIN_LOG_BYTES, MitmSettings, Priority, QuotaSettings, RampSettings,
-    ReferenceSite, Route, SelectionSettings, Site, StorageSettings, TelemetryPolicy, TlsFiles,
+    DataPlaneSettings, Diagnostics, EgressMode, EgressSettings, LogLevel, LoggingSettings,
+    MIN_LOG_BYTES, MitmSettings, Priority, QuotaSettings, RampSettings, ReferenceSite, Route,
+    SelectionSettings, Site, StorageSettings, TelemetryPolicy, TlsFiles,
 };
 
 pub(crate) struct Validator<'a> {
@@ -85,7 +85,7 @@ impl Validator<'_> {
         let diagnostics_node = self.table(&root_node, "diagnostics");
         let diagnostics = self.diagnostics(&diagnostics_node);
         let mitm_node = self.table(&root_node, "mitm");
-        let mitm = self.mitm(&mitm_node);
+        let mitm = self.mitm(&mitm_node, data_plane.listen);
         let clients_node = self.table(&root_node, "clients");
         let clients = self.clients(&clients_node);
         let storage_node = self.table(&root_node, "storage");
@@ -739,11 +739,15 @@ impl Validator<'_> {
         }
     }
 
-    fn mitm(&mut self, node: &Node<'_>) -> MitmSettings {
+    fn mitm(&mut self, node: &Node<'_>, data_plane: SocketAddr) -> MitmSettings {
         self.known_keys(node, &["enabled", "listen"]);
         MitmSettings {
-            enabled: self.boolean(node, "enabled", false),
-            listen: self.listen(node, "listen", DEFAULT_MITM_LISTEN),
+            enabled: self.boolean(node, "enabled", true),
+            listen: self.listen(
+                node,
+                "listen",
+                &super::default_mitm_listen(&data_plane.to_string()),
+            ),
         }
     }
 
