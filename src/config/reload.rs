@@ -141,7 +141,7 @@ mod tests {
              tls_certificate_file = \"c.pem\"\ntls_private_key_file = \"k.pem\"\n\
              upstream_origin = \"http://127.0.0.1:9\"\nfirst_byte_timeout_seconds = 1\n\
              [diagnostics]\nwire_capture_directory = \"cap\"\n\
-             [mitm]\nenabled = true\nlisten = \"127.0.0.1:2\"\n\
+             [mitm]\nenabled = false\nlisten = \"127.0.0.1:2\"\n\
              [storage]\nstate_file = \"state/s.json\"\n\
              [logging]\ndirectory = \"l\"\nmax_bytes = 65536\nretained_files = 1\nlevel = \"debug\"\n\
              [audit]\nmax_bytes = 65536\nretained_files = 1\n",

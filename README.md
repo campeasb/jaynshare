@@ -100,7 +100,7 @@ extracted directory:
 ```sh
 ./jaynshare release fetch 2.0.1 --out ./release
 ./jaynshare config new --out ./jaynshare.toml
-$EDITOR ./jaynshare.toml
+$EDITOR ./jaynshare.toml   # set data_plane.listen to the server's private address
 ./jaynshare server preflight --config ./jaynshare.toml --from ./release
 ./jaynshare server install --config ./jaynshare.toml --from ./release
 ```

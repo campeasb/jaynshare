@@ -704,8 +704,8 @@ fn verify_kit(
 /// container: the wildcard exception applies — `0.0.0.0`/`::` and loopback
 /// pass, any closed-list address passes, anything else fails. The
 /// publication stays `compose::check_publications`' (the closed list of
-/// `--publish` host IPs). The proxy listener is judged only when
-/// `mitm.enabled`.
+/// `--publish` host IPs). The proxy listener is judged unless
+/// `mitm.enabled` is false.
 fn check_listeners(config: &Path) -> Vec<Check> {
     let judge = |name: &str, text: &str| -> Check {
         let Ok(address) = text.parse::<std::net::SocketAddr>() else {
@@ -758,9 +758,10 @@ fn check_listeners(config: &Path) -> Vec<Check> {
         .get("mitm")
         .and_then(|t| t.get("enabled"))
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(true);
     if mitm_enabled {
-        let proxy = listen("mitm").unwrap_or_else(|| crate::config::DEFAULT_MITM_LISTEN.into());
+        let proxy =
+            listen("mitm").unwrap_or_else(|| crate::config::default_mitm_listen(&data_plane));
         checks.push(judge("preflight.listener.proxy", &proxy));
     }
     checks

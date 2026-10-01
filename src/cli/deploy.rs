@@ -495,8 +495,8 @@ fn server_plan(intro: &str, from: &std::path::Path, config: Option<&std::path::P
 }
 
 /// The configured listeners' addresses (the control namespace rides
-/// the data-plane listener; the proxy listener only when the proxy mode is
-/// on). `None` when the configuration cannot be read and parsed.
+/// the data-plane listener; the proxy listener unless the proxy mode is
+/// off). `None` when the configuration cannot be read and parsed.
 fn config_listeners(config: Option<&std::path::Path>) -> Option<String> {
     let table = toml::from_str::<toml::Table>(&std::fs::read_to_string(config?).ok()?).ok()?;
     let listen = |key: &str, default: &str| {
@@ -506,14 +506,18 @@ fn config_listeners(config: Option<&std::path::Path>) -> Option<String> {
             .map(|v| v.as_str().map_or(v.to_string(), str::to_owned))
             .unwrap_or_else(|| default.to_string())
     };
-    let mut listeners = vec![listen("data_plane", crate::config::DEFAULT_LISTEN)];
+    let data_plane = listen("data_plane", crate::config::DEFAULT_LISTEN);
+    let mut listeners = vec![data_plane.clone()];
     if table
         .get("mitm")
         .and_then(|t| t.get("enabled"))
         .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+        .unwrap_or(true)
     {
-        listeners.push(listen("mitm", crate::config::DEFAULT_MITM_LISTEN));
+        listeners.push(listen(
+            "mitm",
+            &crate::config::default_mitm_listen(&data_plane),
+        ));
     }
     Some(listeners.join(", "))
 }

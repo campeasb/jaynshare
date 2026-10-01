@@ -90,8 +90,9 @@ pub(super) const TEMPLATE: &str = r#"# Jaynshare configuration (version 1).
 version = 1
 
 [data_plane]
-# One loopback listener; move it off the loopback only to a private network
-# with filtered ingress.
+# Loopback until you set the server's private address (a tailnet IP, say),
+# with ingress filtered to that network. The client proxy listens on the
+# same address, port 17422.
 listen = "127.0.0.1:17421"
 
 # Optional keys with their defaults; uncomment to override.
@@ -99,8 +100,6 @@ listen = "127.0.0.1:17421"
 # max_connections = 256
 # telemetry_policy = "forward"
 # first_byte_timeout_seconds = 120
-# [mitm]
-# listen = "127.0.0.1:17422"
 # [selection]
 # switch_threshold = 0.98
 # [quota]
@@ -1230,6 +1229,7 @@ mod tests {
     fn the_template_parses_and_is_the_minimal_document() {
         let config = config::parse(TEMPLATE.as_bytes(), Path::new(".")).expect("template parses");
         assert_eq!(config.data_plane.listen.to_string(), "127.0.0.1:17421");
+        assert!(config.mitm.enabled, "clients enrol only with MITM on");
         assert_eq!(config.data_plane.telemetry_policy, TelemetryPolicy::Forward);
         assert!(config.selection.priorities.is_empty());
         assert!(config.selection.routes.is_empty());

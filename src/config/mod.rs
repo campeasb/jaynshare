@@ -20,7 +20,16 @@ pub(crate) mod validate;
 use validate::Validator;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:17421";
-pub const DEFAULT_MITM_LISTEN: &str = "127.0.0.1:17422";
+pub const DEFAULT_MITM_PORT: u16 = 17422;
+
+/// `[mitm] listen` when absent: the data plane's address on
+/// [`DEFAULT_MITM_PORT`], so moving the data plane moves the proxy with it.
+pub fn default_mitm_listen(data_plane: &str) -> String {
+    let ip = data_plane
+        .parse::<SocketAddr>()
+        .map_or(IpAddr::from([127, 0, 0, 1]), |addr| addr.ip());
+    SocketAddr::new(ip, DEFAULT_MITM_PORT).to_string()
+}
 /// A byte limit below this would rotate routine startup bursts away.
 const MIN_LOG_BYTES: i64 = 65_536;
 
@@ -476,6 +485,23 @@ mod tests {
         assert_eq!(c.data_plane.telemetry_policy, TelemetryPolicy::Forward);
         assert!(c.data_plane.upstream_origin.is_none());
         assert_eq!(c.audit.retained_files, 7);
+        assert!(c.mitm.enabled);
+        assert_eq!(c.mitm.listen.to_string(), "127.0.0.1:17422");
+    }
+
+    #[test]
+    fn the_proxy_listener_defaults_to_the_data_plane_address() {
+        let c = parse_str("version = 1\n[data_plane]\nlisten = \"100.64.0.7:9000\"\n").unwrap();
+        assert_eq!(c.mitm.listen.to_string(), "100.64.0.7:17422");
+    }
+
+    #[test]
+    fn an_explicit_proxy_listener_wins_over_the_data_plane_address() {
+        let doc = "version = 1\n[data_plane]\nlisten = \"100.64.0.7:9000\"\n[mitm]\nlisten = \"127.0.0.1:9001\"\n";
+        assert_eq!(
+            parse_str(doc).unwrap().mitm.listen.to_string(),
+            "127.0.0.1:9001"
+        );
     }
 
     #[test]
