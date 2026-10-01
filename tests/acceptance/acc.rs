@@ -521,6 +521,37 @@ async fn acc_login_callback_completes_the_flow() {
     );
 }
 
+/// A real browser keeps the callback connection alive after the redirect;
+/// the flow completes without waiting for it to close.
+#[tokio::test(flavor = "multi_thread")]
+async fn acc_login_callback_completes_on_a_kept_alive_connection() {
+    let _leak_sweep = crate::leaks::LeakGuard::default();
+    let instance = Instance::start("acc-login-keep-alive").await;
+    let (id, url) = start_login(&instance);
+    let (callback, state) = callback_target(&url);
+    let stream = TcpStream::connect(callback).await.expect("connect");
+    let (mut browser, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .expect("handshake");
+    let held = tokio::spawn(connection);
+    let answer = browser
+        .send_request(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/callback?code=oat-keep-alive&state={state}"))
+                .body(Full::new(Bytes::new()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("the callback is answered");
+    assert_eq!(answer.status(), StatusCode::FOUND);
+
+    let operation = await_operation(&instance, &id);
+    assert_eq!(operation["state"], "succeeded");
+    drop(browser);
+    held.abort();
+}
+
 /// The manual path: `account login --stdin` reads a
 /// pasted code and submits it to its own operation. A bare
 /// code, because the paste has to exist before the flow's state does; the
