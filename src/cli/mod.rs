@@ -41,8 +41,8 @@ use crate::server::{COMMIT, Server, Stop, TARGET, VERSION};
 use crate::{data_plane, logging, mitm, state};
 
 use args::{
-    AccountVerb, AuditVerb, CaVerb, Cli, ClientVerb, ConfigVerb, ContainerVerb, LogVerb,
-    OperationVerb, OperatorSecretVerb, OperatorVerb, SecretVerb, ServerVerb, Verb,
+    AccountVerb, AuditVerb, CaVerb, Cli, ClientVerb, ConfigVerb, LogVerb, OperationVerb,
+    OperatorSecretVerb, OperatorVerb, SecretVerb, ServerVerb, Verb,
 };
 use control::Control;
 pub(crate) use control::{error_chain, http_client, http_client_anchors, http_client_plain};
@@ -478,8 +478,6 @@ fn later_verb_refusal(
         verb,
         Verb::Server {
             verb: ServerVerb::Uninstall { purge: true }
-        } | Verb::Container {
-            verb: ContainerVerb::Uninstall { purge: true, .. }
         } | Verb::Enrol { .. }
     );
     if interactive_only {
@@ -690,14 +688,6 @@ fn verb_path(verb: &Verb) -> &'static str {
             ServiceVerb::Stop => "service stop",
             ServiceVerb::Restart => "service restart",
             ServiceVerb::Status => "service status",
-        },
-        Verb::Container { verb } => match verb {
-            ContainerVerb::Install { .. } => "container install",
-            ContainerVerb::Update { .. } => "container update",
-            ContainerVerb::Status { .. } => "container status",
-            ContainerVerb::Backup { .. } => "container backup",
-            ContainerVerb::Restore { .. } => "container restore",
-            ContainerVerb::Uninstall { .. } => "container uninstall",
         },
         Verb::Claude(_) => "claude",
         Verb::Env(_) => "env",

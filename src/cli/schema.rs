@@ -707,11 +707,7 @@ fn result_of(path: &str) -> Option<Value> {
         p if p.starts_with("client ") || p.starts_with("operator ") || p.starts_with("ca ") => {
             open_object()
         }
-        p if p.starts_with("release ")
-            || p.starts_with("server ")
-            || p.starts_with("service ")
-            || p.starts_with("container ") =>
-        {
+        p if p.starts_with("release ") || p.starts_with("server ") || p.starts_with("service ") => {
             reference("deploy_result")
         }
         "ca-update" => reference("ca_update_result"),

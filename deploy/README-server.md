@@ -8,9 +8,9 @@ Decision record: pooling an account requires your dated
 decision record, kept somewhere you own: the account's kind and plan as its
 owner reports it, who decided that pooling it is permitted, and when.
 
-Read these statements before you run `server preflight`, `server install`
-or `container install`. They are operator obligations that no command
-carries out for you.
+Read these statements before you run `server preflight` or
+`server install`. They are operator obligations that no command carries
+out for you.
 
 ## Quickstart
 
@@ -38,12 +38,10 @@ done
 ## Who is the operator
 
 Every account able to reach the server process's loopback -- or to control
-its systemd unit, Docker daemon or Compose project -- is trusted as the
-operator. That control group therefore must have no untrusted user: an
-account that can connect to the loopback service, stop the unit, reach
-the Docker socket or run `docker compose exec` can read the pool's state
-and volumes. Do not share any such account, shell or socket with a user
-the pool does not fully trust.
+its systemd unit -- is trusted as the operator. That control group
+therefore must have no untrusted user: an account that can connect to the
+loopback service or stop the unit can read the pool's state. Do not share
+any such account or shell with a user the pool does not fully trust.
 
 Account pooling is a terms decision, not a technical one. Before an
 account serves engineers, keep your own dated decision record: the
@@ -80,9 +78,7 @@ the private network. A private address never provides encryption.
 
 ## Deployment boundary
 
-Daemon access is operator access. Whoever controls the Docker daemon,
-its socket or `docker compose exec` reads volumes and enters the
-server's loopback trust zone, so they must be the operator. Another
-tenant needs its own VM: separate kernels, separate daemons. Docker
-networks, project names and co-resident containers are not a tenant
-boundary, and an enrolled engineer never receives daemon access.
+Host access is operator access. Whoever is root on the server host
+reads the pool's state and enters the server's loopback trust zone, so
+they must be the operator. Another tenant needs its own VM, and an
+enrolled engineer never receives host access.

@@ -197,10 +197,3 @@ set is enforced in CI by `cargo-deny` (`deny.toml`).
 | `zlib-rs` | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | `zmij` | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | `zopfli` | 0.8.3 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |
-
-## The platform image
-
-The OCI platform image adds the Mozilla CA root bundle
-(`/etc/ssl/certs/ca-certificates.crt`, from Alpine's `ca-certificates-bundle`,
-MPL-2.0), taken from the digest-pinned `alpine` stage named in the
-`Dockerfile`. Nothing else enters the image.

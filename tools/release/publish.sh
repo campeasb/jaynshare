@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Cross-build the five targets, package and sign the release set, push the OCI
-# index, and publish a GitHub release.
+# Cross-build the five targets, package and sign the release set, and publish
+# a GitHub release.
 #
-# Usage: tools/release/publish.sh <semver> --key <seed file> \
-#            --image-repository <repo> [--release-notes <file>]
+# Usage: tools/release/publish.sh <semver> --key <seed file> [--release-notes <file>]
 #
 # The signing seed must sit outside the repository and never enters a
 # build workspace or a log; only its path is passed to build.py.
@@ -13,7 +12,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO"
 
 die() { echo "publish.sh: $1" >&2; exit 2; }
-usage="usage: tools/release/publish.sh <semver> --key <seed file> --image-repository <repo> [--release-notes <file>]"
+usage="usage: tools/release/publish.sh <semver> --key <seed file> [--release-notes <file>]"
 
 version=${1:-}
 shift || true
@@ -23,18 +22,12 @@ printf '%s' "$version" | grep -Eqx "$semver" ||
     die "$version is not a SemVer 2.0.0 version"
 
 key=
-repository=
 notes=
 while [ $# -gt 0 ]; do
     case $1 in
     --key)
         [ $# -ge 2 ] || die "$usage"
         key=$2
-        shift 2
-        ;;
-    --image-repository)
-        [ $# -ge 2 ] || die "$usage"
-        repository=$2
         shift 2
         ;;
     --release-notes)
@@ -46,7 +39,6 @@ while [ $# -gt 0 ]; do
 esac
 done
 [ -n "$key" ] || die "$usage"
-[ -n "$repository" ] || die "$usage"
 
 # The seed lives outside the repository.
 case $key in
@@ -81,9 +73,6 @@ python3 tools/release/build.py \
     --commit "$commit" \
     --key "$key" \
     --out "$out" \
-    --image-repository "$repository" \
-    --image-out "$work/image" \
-    --image-push \
     $(sed -n 's/^--bin /--bin /p' "$work/bins.log")
 
 echo "==> gh release create v$version"

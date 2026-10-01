@@ -154,7 +154,7 @@ pub(crate) const TARGETS: [&str; 5] = [
     "x86_64-pc-windows-msvc",
 ];
 
-/// The seven artifact file names of `version`, with their
+/// The six artifact file names of `version`, with their
 /// purpose and target.
 pub(crate) fn artifact_names(version: &str) -> Vec<(String, &'static str, Option<&'static str>)> {
     let mut names: Vec<(String, &'static str, Option<&'static str>)> = TARGETS
@@ -177,19 +177,14 @@ pub(crate) fn artifact_names(version: &str) -> Vec<(String, &'static str, Option
         "client-kit",
         None,
     ));
-    names.push((
-        format!("jaynshare-{version}-compose.zip"),
-        "compose-kit",
-        None,
-    ));
     names
 }
 
 /// A release under construction: the artifacts' bytes and the manifest that
 /// will be signed. [`write_release`]'s hooks edit it.
 pub(crate) struct ReleaseParts {
-    /// Artifact file name → bytes (filler but for the Compose kit: the verifier reads bytes, not
-    /// archive contents).
+    /// Artifact file name → filler bytes: the verifier reads bytes, not
+    /// archive contents.
     pub(crate) artifacts: Vec<(String, Vec<u8>)>,
     /// `release.json` before canonicalisation.
     pub(crate) manifest: Value,
@@ -211,19 +206,12 @@ pub(crate) fn release_parts(key: &ReleaseKey) -> ReleaseParts {
     release_parts_of(key, FIXTURE_VERSION)
 }
 
-/// A valid release of `version` signed by `key` (the image is tagged
-/// `version` too; its digests stay the fixture's).
+/// A valid release of `version` signed by `key`.
 pub(crate) fn release_parts_of(key: &ReleaseKey, version: &str) -> ReleaseParts {
     let artifacts: Vec<(String, Vec<u8>)> = artifact_names(version)
         .into_iter()
-        .map(|(name, purpose, _)| {
-            // The Compose kit is the real one, pinned to the fixture image,
-            // so the container verbs can materialise it.
-            let bytes = if purpose == "compose-kit" {
-                compose_kit_zip(&ImageFx::fixture().reference())
-            } else {
-                format!("{name}: acceptance filler\n").into_bytes()
-            };
+        .map(|(name, _, _)| {
+            let bytes = format!("{name}: acceptance filler\n").into_bytes();
             (name, bytes)
         })
         .collect();
@@ -244,8 +232,6 @@ pub(crate) fn release_parts_of(key: &ReleaseKey, version: &str) -> ReleaseParts 
             entry
         })
         .collect();
-    let mut image = ImageFx::fixture().record();
-    image["tag"] = json!(version);
     let manifest = json!({
         "schema_version": 1,
         "version": version,
@@ -254,7 +240,6 @@ pub(crate) fn release_parts_of(key: &ReleaseKey, version: &str) -> ReleaseParts 
         "key_id": key.id(),
         "sha256sums_sha256": sha256_hex(&sha256sums(&artifacts)),
         "artifacts": entries,
-        "image": image,
     });
     ReleaseParts {
         artifacts,
@@ -298,207 +283,6 @@ pub(crate) fn write_release_of(
         std::fs::write(dir.join(&name), bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
     dir.to_path_buf()
-}
-
-// ------------------------------------------------------------------ the OCI image
-
-/// The OCI registry repository the product pins (`deploy/release.rs`).
-pub(crate) const OCI_REPOSITORY: &str = "ghcr.io/jaynlabs/jaynshare";
-
-/// A digest as OCI descriptors spell it: `sha256:<64 lowercase hex>`.
-pub(crate) fn oci_digest(bytes: &[u8]) -> String {
-    format!("sha256:{}", sha256_hex(bytes))
-}
-
-/// A platform image manifest's exact bytes, as a registry serves them.
-pub(crate) fn platform_manifest(config_digest: &str, layer_digests: &[String]) -> Vec<u8> {
-    let layers: Vec<Value> = layer_digests
-        .iter()
-        .map(|digest| {
-            json!({
-                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "digest": digest,
-                "size": 1024,
-            })
-        })
-        .collect();
-    serde_json::to_vec_pretty(&json!({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "config": {
-            "mediaType": "application/vnd.oci.image.config.v1+json",
-            "digest": config_digest,
-            "size": 512,
-        },
-        "layers": layers,
-    }))
-    .expect("manifest")
-}
-
-/// An image index's exact bytes over `(platform, manifest bytes)` entries;
-/// `platform` is `<os>/<architecture>`.
-pub(crate) fn image_index(manifests: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let entries: Vec<Value> = manifests
-        .iter()
-        .map(|(platform, bytes)| {
-            let (os, architecture) = platform.split_once('/').expect("os/architecture");
-            json!({
-                "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "digest": oci_digest(bytes),
-                "size": bytes.len(),
-                "platform": { "architecture": architecture, "os": os },
-            })
-        })
-        .collect();
-    serde_json::to_vec_pretty(&json!({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.index.v1+json",
-        "manifests": entries,
-    }))
-    .expect("index")
-}
-
-/// One platform image of [`ImageFx`].
-pub(crate) struct PlatformFx {
-    /// `<os>/<architecture>`.
-    pub(crate) platform: String,
-    pub(crate) config_digest: String,
-    pub(crate) layer_digests: Vec<String>,
-    /// The manifest's exact bytes: [`platform_manifest`] of the two above.
-    pub(crate) manifest: Vec<u8>,
-}
-
-/// The fixture release's OCI image: the index and platform manifests
-/// A registry would serve, and the `release.json` `image` record they imply.
-/// Every digest is the SHA-256 of the exact bytes it names, so a verifier that
-/// hashes what `docker buildx imagetools inspect --raw` returned agrees with
-/// the record. [`ImageFx::script_registry`] makes the fake `docker` serve it.
-pub(crate) struct ImageFx {
-    pub(crate) repository: String,
-    pub(crate) tag: String,
-    /// The index's exact bytes.
-    pub(crate) index: Vec<u8>,
-    /// `linux/amd64`, then `linux/arm64`.
-    pub(crate) platforms: Vec<PlatformFx>,
-}
-
-impl ImageFx {
-    /// [`OCI_REPOSITORY`] tagged [`FIXTURE_VERSION`]: two platforms, one
-    /// configuration and two layers each.
-    pub(crate) fn fixture() -> Self {
-        let platforms: Vec<PlatformFx> = ["linux/amd64", "linux/arm64"]
-            .iter()
-            .map(|platform| {
-                let config_digest = oci_digest(format!("config {platform}").as_bytes());
-                let layer_digests: Vec<String> = (1..=2)
-                    .map(|n| oci_digest(format!("layer {n} {platform}").as_bytes()))
-                    .collect();
-                let manifest = platform_manifest(&config_digest, &layer_digests);
-                PlatformFx {
-                    platform: (*platform).to_string(),
-                    config_digest,
-                    layer_digests,
-                    manifest,
-                }
-            })
-            .collect();
-        let index = image_index(
-            &platforms
-                .iter()
-                .map(|p| (p.platform.clone(), p.manifest.clone()))
-                .collect::<Vec<_>>(),
-        );
-        Self {
-            repository: OCI_REPOSITORY.to_string(),
-            tag: FIXTURE_VERSION.to_string(),
-            index,
-            platforms,
-        }
-    }
-
-    pub(crate) fn index_digest(&self) -> String {
-        oci_digest(&self.index)
-    }
-
-    /// The pinned reference `compose.yaml` names: `<repository>@<index digest>`.
-    pub(crate) fn reference(&self) -> String {
-        format!("{}@{}", self.repository, self.index_digest())
-    }
-
-    /// `release.json`'s `image` object (`deploy/release.rs::ImageRecord`).
-    pub(crate) fn record(&self) -> Value {
-        json!({
-            "repository": self.repository,
-            "tag": self.tag,
-            "index_digest": self.index_digest(),
-            "platforms": self.platforms.iter().map(|p| json!({
-                "platform": p.platform,
-                "manifest_digest": oci_digest(&p.manifest),
-                "config_digest": p.config_digest,
-                "layer_digests": p.layer_digests,
-            })).collect::<Vec<_>>(),
-        })
-    }
-
-    /// Scripts `tools`' fake `docker` to serve this image the way the product
-    /// reads a registry: `docker buildx imagetools inspect --raw <ref>` prints
-    /// the exact bytes of the index (`<repository>@<index digest>`) or of one
-    /// platform manifest (`<repository>@<manifest digest>`).
-    pub(crate) fn script_registry(&self, tools: &crate::fake_tools::FakeTools) {
-        let raw = |reference: &str, bytes: &[u8]| {
-            tools
-                .rule(
-                    "docker",
-                    &["buildx", "imagetools", "inspect", "--raw", reference],
-                )
-                .stdout(std::str::from_utf8(bytes).expect("OCI JSON is UTF-8"));
-        };
-        raw(&self.reference(), &self.index);
-        for platform in &self.platforms {
-            raw(
-                &format!("{}@{}", self.repository, oci_digest(&platform.manifest)),
-                &platform.manifest,
-            );
-        }
-    }
-}
-
-/// the Compose kit as the release tool writes it: every file of
-/// `tools/release/compose-kit/`, with `compose.yaml`'s `@IMAGE@` replaced by
-/// `image_reference` (pinned by index digest).
-pub(crate) fn compose_kit_zip(image_reference: &str) -> Vec<u8> {
-    use std::io::Write as _;
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/release/compose-kit");
-    let mut names: Vec<String> = std::fs::read_dir(&source)
-        .expect("tools/release/compose-kit")
-        .map(|entry| {
-            entry
-                .expect("entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    names.sort();
-    let mut buffer = std::io::Cursor::new(Vec::new());
-    {
-        let mut archive = zip::ZipWriter::new(&mut buffer);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        for name in names {
-            let mut bytes = std::fs::read(source.join(&name)).expect("kit file");
-            if name == "compose.yaml" {
-                bytes = String::from_utf8(bytes)
-                    .expect("compose.yaml is UTF-8")
-                    .replace("@IMAGE@", image_reference)
-                    .into_bytes();
-            }
-            archive.start_file(name, options).expect("kit member");
-            archive.write_all(&bytes).expect("kit member bytes");
-        }
-        archive.finish().expect("kit");
-    }
-    buffer.into_inner()
 }
 
 // A real platform archive (part C)

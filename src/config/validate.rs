@@ -606,7 +606,7 @@ impl Validator<'_> {
         Some(uri)
     }
 
-    /// The origin a published container listener advertises —
+    /// The origin a forwarded listener advertises —
     /// host and port required, unlike `upstream_origin`'s loopback rule.
     fn advertised_origin(&mut self, node: &Node<'_>, name: &str) -> Option<String> {
         let s = self.string(node, name)?;

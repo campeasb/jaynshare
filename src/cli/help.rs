@@ -721,56 +721,6 @@ pub(super) static DOCS: &[VerbDoc] = &[
         [19],
         ["jaynshare service status"]
     ),
-    verb!(
-        "container install",
-        Deploy,
-        None,
-        "Install the Compose project from a kit; --config names the file to mount",
-        [17, 18, 19, 20],
-        [
-            "jaynshare --config <path> container install --project <name> --from <compose-kit.zip> --publish <host-ip:port>"
-        ]
-    ),
-    verb!(
-        "container update",
-        Deploy,
-        None,
-        "Update the Compose project from a kit (asks; --yes skips)",
-        [17, 18, 19, 20, 21],
-        ["jaynshare container update --project <name> --from <compose-kit.zip>"]
-    ),
-    verb!(
-        "container status",
-        Deploy,
-        None,
-        "The project's health and status",
-        [19],
-        ["jaynshare container status --project <name>"]
-    ),
-    verb!(
-        "container backup",
-        Deploy,
-        None,
-        "Archive the project's volume",
-        [8, 19],
-        ["jaynshare container backup --project <name> --out <archive>"]
-    ),
-    verb!(
-        "container restore",
-        Deploy,
-        None,
-        "Restore the project's volume from an archive",
-        [8, 19],
-        ["jaynshare container restore --project <name> --from <archive>"]
-    ),
-    verb!(
-        "container uninstall",
-        Deploy,
-        None,
-        "Remove the project, preserving the volume unless --purge (interactive only)",
-        [8, 19, 21],
-        ["jaynshare container uninstall --project <name>"]
-    ),
     // ---- server
     verb!(
         "serve",
@@ -948,7 +898,7 @@ pub(super) fn exit_meaning(code: i32) -> &'static str {
         16 => "pick mode with no usable terminal",
         17 => "release verification failed",
         18 => "preflight failed or platform refused",
-        19 => "service or container manager reported failure",
+        19 => "service manager reported failure",
         20 => "rolled back after a failed post-operation check",
         21 => "confirmation required and not given, or an interactive-only verb without a terminal",
         22 => "serve: a listener could not be bound",

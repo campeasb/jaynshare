@@ -4,12 +4,11 @@
 //! only what that wrapper asks.
 //!
 //! `ignore
-//! let tools = FakeTools::new(&root, &["docker"]);
-//! tools.rule("docker", &["info"]).stdout("{\"rootless\":true}").exit(0);
-//! tools.rule("docker", &["compose", "up"]).times(1).exit(1); // first up fails
+//! let tools = FakeTools::new(&root, &["systemctl"]);
+//! tools.rule("systemctl", &["start"]).times(1).exit(1); // first start fails
 //! let env = [isolated_env(&home), tools.env].concat;
-//! let (code, out, err) = cli_raw(&["container", "status", "--project", "a"], &env, None);
-//! assert_eq!(tools.calls("docker")[0], ["info", "--format", "json"]);
+//! let (code, out, err) = cli_raw(&["service", "start"], &env, None);
+//! assert_eq!(tools.calls("systemctl")[0], ["start", "jaynshare.service"]);
 //! `
 
 #![allow(dead_code)] // the deploy units script the fakes
@@ -178,18 +177,18 @@ impl Rule {
 #[test]
 fn the_fake_tool_answers_in_order_and_records_every_call() {
     let root = crate::harness::scratch("fake-tools-self-test");
-    let tools = FakeTools::new(&root, &["docker"]);
+    let tools = FakeTools::new(&root, &["systemctl"]);
     tools
-        .rule("docker", &["compose", "up"])
+        .rule("systemctl", &["start"])
         .times(1)
         .stderr("boom\n")
         .exit(3);
-    tools.rule("docker", &["compose", "up"]).stdout("up\n");
+    tools.rule("systemctl", &["start"]).stdout("started\n");
     tools
-        .rule("docker", &["version"])
+        .rule("systemctl", &["show"])
         .run(Path::new("/bin/echo"), &["forwarded", "{argv}"]);
     let run = |args: &[&str]| {
-        let output = Command::new(tools.bin.join("docker"))
+        let output = Command::new(tools.bin.join("systemctl"))
             .args(args)
             .envs(tools.env())
             .output()
@@ -202,14 +201,17 @@ fn the_fake_tool_answers_in_order_and_records_every_call() {
     if cfg!(windows) {
         return;
     }
-    assert_eq!(run(&["compose", "-p", "a", "up", "-d"]), (3, String::new()));
-    assert_eq!(run(&["compose", "-p", "a", "up", "-d"]), (0, "up\n".into()));
+    assert_eq!(run(&["start", "jaynshare.service"]), (3, String::new()));
     assert_eq!(
-        run(&["version", "--format", "x"]),
-        (0, "forwarded --format x\n".into())
+        run(&["start", "jaynshare.service"]),
+        (0, "started\n".into())
     );
-    assert_eq!(run(&["info"]), (0, String::new()));
-    let calls = tools.calls("docker");
+    assert_eq!(
+        run(&["show", "--property", "x"]),
+        (0, "forwarded --property x\n".into())
+    );
+    assert_eq!(run(&["status"]), (0, String::new()));
+    let calls = tools.calls("systemctl");
     assert_eq!(calls.len(), 4);
-    assert_eq!(calls[3], ["info"]);
+    assert_eq!(calls[3], ["status"]);
 }

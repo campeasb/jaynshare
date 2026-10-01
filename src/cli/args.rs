@@ -121,10 +121,6 @@ pub(super) enum Verb {
         #[command(subcommand)]
         verb: ServiceVerb,
     },
-    Container {
-        #[command(subcommand)]
-        verb: ContainerVerb,
-    },
     // ---- engineer
     Claude(ClaudeArgs),
     Env(EnvArgs),
@@ -693,54 +689,6 @@ pub(super) enum ServiceVerb {
     Stop,
     Restart,
     Status,
-}
-
-#[derive(Subcommand)]
-pub(super) enum ContainerVerb {
-    Install {
-        #[arg(long, value_name = "name")]
-        project: String,
-        #[arg(long, value_name = "compose-kit.zip")]
-        from: PathBuf,
-        /// One or two `host-ip:port` publications, comma-separated.
-        #[arg(long, value_name = "host-ip:port[,host-ip:port]")]
-        publish: String,
-        #[arg(long, value_name = "n")]
-        cpus: Option<String>,
-        #[arg(long, value_name = "size")]
-        memory: Option<String>,
-        #[arg(long, value_name = "n")]
-        pids: Option<u64>,
-    },
-    Update {
-        #[arg(long, value_name = "name")]
-        project: String,
-        #[arg(long, value_name = "compose-kit.zip")]
-        from: PathBuf,
-    },
-    Status {
-        #[arg(long, value_name = "name")]
-        project: String,
-    },
-    Backup {
-        #[arg(long, value_name = "name")]
-        project: String,
-        #[arg(long, value_name = "archive")]
-        out: PathBuf,
-    },
-    Restore {
-        #[arg(long, value_name = "name")]
-        project: String,
-        #[arg(long, value_name = "archive")]
-        from: PathBuf,
-    },
-    Uninstall {
-        #[arg(long, value_name = "name")]
-        project: String,
-        /// Remove the volume too; interactive-only.
-        #[arg(long)]
-        purge: bool,
-    },
 }
 
 /// `claude`'s and `env`'s launch intent: at most one of the three.

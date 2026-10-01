@@ -31,14 +31,5 @@ lines = [
     "|---|---|---|---|",
 ]
 lines += [f"| `{n}` | {v} | {lic} | {repo} |" for n, v, lic, repo in crates]
-lines += [
-    "",
-    "## The platform image",
-    "",
-    "The OCI platform image adds the Mozilla CA root bundle",
-    "(`/etc/ssl/certs/ca-certificates.crt`, from Alpine's `ca-certificates-bundle`,",
-    "MPL-2.0), taken from the digest-pinned `alpine` stage named in the",
-    "`Dockerfile`. Nothing else enters the image.",
-]
 Path("NOTICE.md").write_text("\n".join(lines) + "\n")
 print(f"NOTICE.md: {len(crates)} crates")

@@ -1986,61 +1986,29 @@ impl Operator {
     }
 }
 
-/// Daemon access is operator access: whatever runs
-/// inside `docker compose exec` in the operator's environment reads the
+/// Host access is operator access: the CLI on the server host reads the
 /// operator projection, an enrolled engineer's credential is refused at the
 /// operator endpoints, and the deployment docs require one VM per tenant.
 #[tokio::test(flavor = "multi_thread")]
-async fn daemon_access_is_operator_access() {
+async fn host_access_is_operator_access() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
     if !client_platform() {
         eprintln!("skipping: enrollment: no client payload for this platform");
         return;
     }
-    let operator = Operator::start("daemon-access-operator").await;
+    let operator = Operator::start("host-access-operator").await;
 
     // One enrolled engineer on this instance, on the operator's machine.
-    let home = scratch("daemon-access-operator-client").join("home");
+    let home = scratch("host-access-operator-client").join("home");
     private_dir(&home);
     let client_secret = enrol_into(&operator, "eng", "Eng Desk", &home).await;
 
-    // The daemon side: a fake `docker` forwards `compose … exec server …` to
-    // the release binary in the caller's environment — exactly what the
-    // server container's loopback trust zone is. `exec` runs the command
-    // after the service name inside that container.
-    let tools =
-        crate::fake_tools::FakeTools::new(&scratch("daemon-access-operator-docker"), &["docker"]);
-    tools
-        .rule("docker", &["compose", "exec", "server"])
-        .run(&binary(), &["{argv}"]);
-    let mut env = vec![(
-        "JAYNSHARE_CONFIG".to_string(),
-        operator.instance.config.display().to_string(),
-    )];
-    env.extend(isolated_env(&operator.home));
-    env.extend(tools.env());
-    let output = std::process::Command::new(tools.bin.join("docker"))
-        .args(["compose", "-p", "a", "exec", "server", "status", "--json"])
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .output()
-        .expect("run the fake docker");
-    assert_eq!(
-        tools.calls("docker"),
-        vec![vec![
-            "compose", "-p", "a", "exec", "server", "status", "--json",
-        ]]
-    );
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "exec: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let envelope: Value = serde_json::from_slice(&output.stdout).expect("envelope");
+    let (exit, stdout, stderr) = operator.cli(&["status", "--json"]);
+    assert_eq!(exit, 0, "the operator form: {stdout}{stderr}");
+    let envelope: Value = serde_json::from_str(stdout.trim()).expect("envelope");
     assert!(
         envelope["result"]["status"]["accounts"].is_array(),
-        "daemon control reads the operator projection: {envelope}"
+        "host control reads the operator projection: {envelope}"
     );
 
     // The engineer's side: the client projection carries no operator facts.
@@ -2067,30 +2035,10 @@ async fn daemon_access_is_operator_access() {
     assert_eq!(answer.status, StatusCode::FORBIDDEN, "{answer:?}");
     assert_eq!(answer.json()["error"]["code"], "operator_required");
 
-    // The deployment docs state the boundary: daemon access is operator
-    // access, and an untrusted tenant needs a VM of its own. The server README
-    // and the Compose kit instructions both state it; whichever
-    // exists carries the statement, and neither existing is a failure that
-    // names both.
-    let server_doc = Path::new("deploy/README-server.md");
-    let compose_doc = Path::new("tools/release/compose-kit/README.txt");
-    let (doc, text) = if server_doc.is_file() {
-        (
-            server_doc,
-            std::fs::read_to_string(server_doc).expect("read"),
-        )
-    } else if compose_doc.is_file() {
-        (
-            compose_doc,
-            std::fs::read_to_string(compose_doc).expect("read"),
-        )
-    } else {
-        panic!(
-            "neither deploy/README-server.md nor \
-             tools/release/compose-kit/README.txt exists: \
-             the deployment docs must state the egress boundary"
-        );
-    };
+    // The deployment docs state the boundary: host access is operator
+    // access, and an untrusted tenant needs a VM of its own.
+    let doc = Path::new("deploy/README-server.md");
+    let text = std::fs::read_to_string(doc).expect("deploy/README-server.md");
     assert!(
         text.contains("operator access"),
         "{}: {text}",
@@ -2402,27 +2350,21 @@ async fn the_os_trust_store_is_optional_and_exact() {
     );
 }
 
-/// The split: the exec half (`operator secret set`,
-/// `client issue`) runs inside the container — the fake `docker`'s `compose
-/// exec server` forwarded to the release binary against the real loopback
-/// instance — and discloses once on stdout; the host half
-/// (`client bundle` with `--server` and the disclosed secret) writes
-/// the ZIP and no code file; a packaged or a claimed entry refuses to
-/// be packaged again; the exec path reaches the loopback operator.
+/// The split: the server half (`operator secret set`, `client issue`)
+/// runs on the server's loopback and discloses once on stdout; the remote
+/// half (`client bundle` with `--server` and the disclosed secret) writes
+/// the ZIP and no code file; a packaged or a claimed entry refuses to be
+/// packaged again.
 #[tokio::test(flavor = "multi_thread")]
-async fn container_enrolment_through_exec_and_host_packaging() {
+async fn remote_enrolment_through_issue_and_remote_packaging() {
     if !client_platform() {
         eprintln!("skipping: enrollment: no client payload for this platform");
         return;
     }
-    use std::process::Command;
-
-    use crate::fake_tools::FakeTools;
-
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let operator = Operator::start("container-enrolment-through").await;
+    let operator = Operator::start("remote-enrolment").await;
 
-    // The exec half: on the container's loopback the operator
+    // The server half: on the server's loopback the operator
     // CLI provisions the remote-operator secret and issues the entry; each
     // verb discloses its secret exactly once, and only on stdout.
     let (secret_exit, secret_stdout, secret_stderr) = operator.cli(&["operator", "secret", "set"]);
@@ -2483,10 +2425,10 @@ async fn container_enrolment_through_exec_and_host_packaging() {
         "stderr carries no code: {secret_stderr}"
     );
 
-    // The host half: the native binary packages the pending
-    // entry with the operator secret from a 0600 file, against the
-    // instance's base URL, and writes the ZIP and no code file.
-    let staged = scratch("container-enrolment-through-secret").join("op-secret");
+    // The remote half: the binary packages the pending entry with the
+    // operator secret from a 0600 file, against the instance's base URL,
+    // and writes the ZIP and no code file.
+    let staged = scratch("remote-enrolment-secret").join("op-secret");
     crate::harness::write_private(&staged, &secret);
     let server = format!("http://{}", operator.instance.addr);
     let bundle_args = [
@@ -2534,7 +2476,7 @@ async fn container_enrolment_through_exec_and_host_packaging() {
 
     // A claimed entry is no longer pending: after the full install of a
     // fresh `desk-2`, packaging it refuses and discloses nothing.
-    let home = scratch("container-enrolment-through-engineer").join("home");
+    let home = scratch("remote-enrolment-engineer").join("home");
     private_dir(&home);
     enrol_into(&operator, "desk-2", "Desk Two", &home).await;
     let (exit, _, stderr) = operator.cli(&[
@@ -2551,49 +2493,6 @@ async fn container_enrolment_through_exec_and_host_packaging() {
         &staged.display().to_string(),
     ]);
     assert_eq!(exit, 8, "a non-pending entry cannot be packaged: {stderr}");
-
-    // the non-loopback leg: the harness instance listens on loopback
-    // only, so there is no non-loopback, non-TLS origin to run `client
-    // issue` against here; and prove the
-    // `insecure_channel` refusal this leg names.
-
-    // The exec path, for real: the fake `docker`'s `compose
-    // exec server` forwards the in-container command to the release binary
-    // against the running loopback instance, the way the operator's
-    // terminal reaches it — exit 0 is the exec path reaching the
-    // loopback operator.
-    let tools = FakeTools::new(&scratch("container-enrolment-through-docker"), &["docker"]);
-    // `{argv}` expands to everything after the matched words, so the
-    // compose service name is part of the match and the exec'd command is
-    // the container's `status --json`.
-    tools
-        .rule("docker", &["compose", "exec", "server"])
-        .run(&binary(), &["{argv}"]);
-    let mut exec_env = isolated_env(&operator.instance.root.join("home"));
-    exec_env.extend(tools.env());
-    exec_env.push((
-        "JAYNSHARE_CONFIG".into(),
-        operator.instance.config.display().to_string(),
-    ));
-    let output = Command::new(tools.bin.join("docker"))
-        .args(["compose", "-p", "a", "exec", "server", "status", "--json"])
-        .envs(exec_env)
-        .output()
-        .expect("run the fake docker exec");
-    assert_eq!(
-        output.status.code().unwrap_or(-1),
-        0,
-        "the exec path reaches the loopback operator: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let calls = tools.calls("docker");
-    assert_eq!(calls.len(), 1, "one recorded call: {calls:?}");
-    assert_eq!(
-        calls[0],
-        ["compose", "-p", "a", "exec", "server", "status", "--json"],
-        "the recorded argv"
-    );
 }
 
 /// The ids `client list` shows for this instance.

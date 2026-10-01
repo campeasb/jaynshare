@@ -182,7 +182,7 @@ impl Control {
         };
         let message = match &self.config_path {
             Some(path) => format!(
-                "{tried}: {why}; the address comes from {} (data_plane.listen); check `jaynshare service status` or `jaynshare container status`",
+                "{tried}: {why}; the address comes from {} (data_plane.listen); check `jaynshare service status`",
                 path.display()
             ),
             None => format!("{}: {why}", self.origin),

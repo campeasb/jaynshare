@@ -27,10 +27,6 @@ const OFFICIAL_ASSET_HOSTS: [&str; 2] = [
     "objects.githubusercontent.com",
 ];
 
-/// The OCI registry repository.
-#[allow(dead_code)] // read by the container verbs; unused on some feature sets
-pub const OCI_REPOSITORY: &str = "ghcr.io/jaynlabs/jaynshare";
-
 /// Exactly the five release targets.
 pub const TARGETS: [&str; 5] = [
     "x86_64-unknown-linux-musl",
@@ -403,7 +399,6 @@ pub async fn fetch(
 pub enum Purpose {
     Platform,
     ClientKit,
-    ComposeKit,
 }
 
 /// One client-kit member binding.
@@ -419,11 +414,11 @@ pub struct Member {
 pub struct Artifact {
     pub filename: String,
     pub purpose: Purpose,
-    /// The Rust target of a platform archive; `None` for the two kits.
+    /// The Rust target of a platform archive; `None` for the client kit.
     pub target: Option<String>,
     pub length: u64,
     pub sha256: String,
-    /// The client kit's members; empty for the other purposes.
+    /// The client kit's members; empty for a platform archive.
     pub members: Vec<Member>,
 }
 
@@ -441,45 +436,13 @@ pub struct ReleaseManifest {
     /// The SHA-256 of `SHA256SUMS`'s bytes.
     pub sha256sums_sha256: String,
     pub artifacts: Vec<Artifact>,
-    /// The OCI image index. Absent from a release built without the
-    /// image (the container verbs refuse such a release).
-    pub image: Option<ImageRecord>,
-}
-
-/// `release.json`'s `image` object. Every digest is spelled
-/// `sha256:<64 lowercase hex>`, the OCI descriptor form.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageRecord {
-    /// The registry repository ([`OCI_REPOSITORY`] for an official release).
-    pub repository: String,
-    /// The SemVer tag: the release version.
-    pub tag: String,
-    /// The digest of the image index's exact bytes.
-    pub index_digest: String,
-    /// One entry per platform, `linux/amd64` and `linux/arm64`.
-    pub platforms: Vec<PlatformImage>,
-}
-
-/// One platform image of the index.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlatformImage {
-    /// `<os>/<architecture>`, as the index's `platform` object names it.
-    pub platform: String,
-    /// The digest of the platform image manifest's exact bytes.
-    pub manifest_digest: String,
-    /// The image configuration's digest (the manifest's `config.digest`).
-    pub config_digest: String,
-    /// The manifest's `layers[].digest`, in order.
-    pub layer_digests: Vec<String>,
 }
 
 impl ReleaseManifest {
     /// Parses `release.json`. Field names: `schema_version` (1), `version`,
     /// `commit`, `published_at`, `key_id`, `next_key_id` (optional),
     /// `sha256sums_sha256`, `artifacts[] { filename, purpose, target,
-    /// length, sha256, members[] { path, length, sha256 } }`, and the
-    /// optional `image { repository, tag, index_digest, platforms[] {
-    /// platform, manifest_digest, config_digest, layer_digests[] } }`.
+    /// length, sha256, members[] { path, length, sha256 } }`.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let value: Value =
             serde_json::from_slice(bytes).map_err(|e| format!("release.json: not JSON: {e}"))?;
@@ -505,7 +468,6 @@ impl ReleaseManifest {
             let purpose = match entry["purpose"].as_str() {
                 Some("platform") => Purpose::Platform,
                 Some("client-kit") => Purpose::ClientKit,
-                Some("compose-kit") => Purpose::ComposeKit,
                 _ => return Err("release.json: an artifact has an unknown `purpose`".into()),
             };
             let mut members = Vec::new();
@@ -527,39 +489,6 @@ impl ReleaseManifest {
                 members,
             });
         }
-        let image = match value.get("image") {
-            None => None,
-            Some(image) => {
-                let mut platforms = Vec::new();
-                for entry in image["platforms"]
-                    .as_array()
-                    .ok_or("release.json: `image.platforms` is missing or not an array")?
-                {
-                    let layer_digests = entry["layer_digests"]
-                        .as_array()
-                        .ok_or("release.json: `layer_digests` is missing or not an array")?
-                        .iter()
-                        .map(|d| {
-                            d.as_str().map(str::to_string).ok_or_else(|| {
-                                "release.json: a layer digest is not a string".to_string()
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    platforms.push(PlatformImage {
-                        platform: text(entry, "platform")?,
-                        manifest_digest: text(entry, "manifest_digest")?,
-                        config_digest: text(entry, "config_digest")?,
-                        layer_digests,
-                    });
-                }
-                Some(ImageRecord {
-                    repository: text(image, "repository")?,
-                    tag: text(image, "tag")?,
-                    index_digest: text(image, "index_digest")?,
-                    platforms,
-                })
-            }
-        };
         Ok(Self {
             version: text(&value, "version")?,
             commit: text(&value, "commit")?,
@@ -568,7 +497,6 @@ impl ReleaseManifest {
             next_key_id: value["next_key_id"].as_str().map(str::to_string),
             sha256sums_sha256: text(&value, "sha256sums_sha256")?,
             artifacts,
-            image,
         })
     }
 }
@@ -832,7 +760,6 @@ pub fn verify_manifest(release: &ReleaseDir, manifest: &ReleaseManifest) -> Vec<
         return checks;
     }
     let client_kit = format!("jaynshare-{}-client-kit.zip", manifest.version);
-    let compose_kit = format!("jaynshare-{}-compose.zip", manifest.version);
     for artifact in &manifest.artifacts {
         let expected = match artifact.purpose {
             Purpose::Platform => {
@@ -861,7 +788,6 @@ pub fn verify_manifest(release: &ReleaseDir, manifest: &ReleaseManifest) -> Vec<
                 format!("jaynshare-{}-{target}.{extension}", manifest.version)
             }
             Purpose::ClientKit => client_kit.clone(),
-            Purpose::ComposeKit => compose_kit.clone(),
         };
         if artifact.filename != expected {
             checks.push(Check::fail(
@@ -890,26 +816,21 @@ pub fn verify_manifest(release: &ReleaseDir, manifest: &ReleaseManifest) -> Vec<
             return checks;
         }
     }
-    for (purpose, name) in [
-        (Purpose::ClientKit, "client kit"),
-        (Purpose::ComposeKit, "Compose kit"),
-    ] {
-        let count = manifest
-            .artifacts
-            .iter()
-            .filter(|a| a.purpose == purpose)
-            .count();
-        if count != 1 {
-            checks.push(Check::fail(
-                "release.names",
-                format!("{count} {name} archives in release.json, exactly one required"),
-            ));
-            return checks;
-        }
+    let client_kits = manifest
+        .artifacts
+        .iter()
+        .filter(|a| a.purpose == Purpose::ClientKit)
+        .count();
+    if client_kits != 1 {
+        checks.push(Check::fail(
+            "release.names",
+            format!("{client_kits} client kit archives in release.json, exactly one required"),
+        ));
+        return checks;
     }
     checks.push(Check::pass(
         "release.names",
-        "every artifact file name follows the release layout: one archive per target, one client kit, one Compose kit",
+        "every artifact file name follows the release layout: one archive per target and one client kit",
     ));
 
     // Every file present is listed. The overlap adds the next
@@ -1257,20 +1178,15 @@ mod tests {
             }));
             artifacts.push((name, bytes));
         }
-        for (suffix, purpose) in [
-            ("client-kit.zip", "client-kit"),
-            ("compose.zip", "compose-kit"),
-        ] {
-            let name = format!("jaynshare-{VERSION}-{suffix}");
-            let bytes = filler(&name);
-            entries.push(json!({
-                "filename": name,
-                "purpose": purpose,
-                "length": bytes.len(),
-                "sha256": sha256_hex(&bytes),
-            }));
-            artifacts.push((name, bytes));
-        }
+        let name = format!("jaynshare-{VERSION}-client-kit.zip");
+        let bytes = filler(&name);
+        entries.push(json!({
+            "filename": name,
+            "purpose": "client-kit",
+            "length": bytes.len(),
+            "sha256": sha256_hex(&bytes),
+        }));
+        artifacts.push((name, bytes));
         let manifest = json!({
             "schema_version": 1,
             "version": VERSION,
@@ -1330,7 +1246,7 @@ mod tests {
         );
         assert!(checks.iter().all(|c| c.passed), "{checks:?}");
         assert!(
-            checks[4].message.contains("7 artifacts verified"),
+            checks[4].message.contains("6 artifacts verified"),
             "{checks:?}"
         );
     }
