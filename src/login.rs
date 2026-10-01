@@ -569,7 +569,9 @@ async fn answer_callback(
             )
         }
     });
+    // A browser would otherwise hold the connection, and with it the query, for minutes.
     hyper::server::conn::http1::Builder::new()
+        .keep_alive(false)
         .serve_connection(TokioIo::new(stream), service)
         .await
         .map_err(|e| e.to_string())?;

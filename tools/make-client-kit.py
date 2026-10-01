@@ -7,6 +7,7 @@ what an independent writer produces.
 
     make-client-kit.py keygen --pub release.pub --seed seed.bin
     make-client-kit.py build --payload-dir payload/ --key seed.bin --out kit.zip
+        [--version <semver>] [--commit <id>]
     make-client-kit.py --self-test
 
 Pure python3: zipfile, hashlib, json — and a small RFC 8032 Ed25519 so the
@@ -277,6 +278,8 @@ def main() -> None:
     build_parser.add_argument("--payload-dir", required=True)
     build_parser.add_argument("--key", required=True)
     build_parser.add_argument("--out", required=True)
+    build_parser.add_argument("--version", default="0.0.0-m4kit")
+    build_parser.add_argument("--commit", default="local")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -285,7 +288,7 @@ def main() -> None:
     if args.command == "keygen":
         keygen(args.pub, args.seed)
     elif args.command == "build":
-        build(args.payload_dir, args.key, args.out)
+        build(args.payload_dir, args.key, args.out, args.version, args.commit)
     else:
         parser.error("one of --self-test, keygen or build")
 

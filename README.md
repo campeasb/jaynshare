@@ -68,6 +68,18 @@ a product of Anthropic.
 > A server operator—or anyone who compromises the server—can read or alter
 > that traffic. Only use a server whose operator and deployed code you trust.
 
+## Try it on your Mac
+
+Before having to set up a server, you can spin up one on your own Mac easily using this (it downloads the latest release, runs it, enrolls a client and prompts you to log your Claude account).
+
+It needs `python3` and Claude Code installed.
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/jaynlabs/jaynshare/main/tools/quickstart.sh
+bash quickstart.sh          #sets up everything
+bash quickstart.sh claude   #launches claude
+```
+
 ## Highlights
 
 - OAuth subscription and API-key accounts
