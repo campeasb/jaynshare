@@ -1,6 +1,6 @@
-//! Whether the host firewall and Docker's published-port rules
-//! admit a listener from a public interface or source range. The one tool
-//! wrapper is [`nft_ruleset`]; the test suite's fake `nft` answers only it.
+//! Whether the host firewall admits a listener from a public interface or
+//! source range. The one tool wrapper is [`nft_ruleset`]; the test suite's
+//! fake `nft` answers only it.
 
 use serde_json::Value;
 

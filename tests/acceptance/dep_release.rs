@@ -249,7 +249,7 @@ async fn an_idle_server_makes_no_release_request() {
     instance.add_fsub();
 
     // Three exchanges, then the server is left idle: nothing in the idle
-    // window may contact the release or image-registry host.
+    // window may contact the release host.
     for _ in 0..3 {
         assert_eq!(
             send(instance.addr, messages(haiku_prompt())).await.status,
@@ -276,8 +276,8 @@ async fn an_idle_server_makes_no_release_request() {
         );
     }
 
-    // The binary names the release origin and the image registry only in
-    // their two fetching verbs' constants.
+    // The binary names the release origin only in its fetching verbs'
+    // constant.
     let bytes = std::fs::read(crate::harness::binary()).expect("release binary");
     let needle = |text: &[u8], pattern: &str| {
         text.windows(pattern.len())
@@ -288,13 +288,6 @@ async fn an_idle_server_makes_no_release_request() {
         needle(&bytes, "github.com/jaynlabs/jaynshare/releases"),
         1,
         "the release origin is named only by the `OFFICIAL_ORIGIN` constant"
-    );
-    // The whole repository: its first 16 bytes also sit in an x86_64 vector
-    // constant, where the comparison with a recorded repository is inlined.
-    assert_eq!(
-        needle(&bytes, "ghcr.io/jaynlabs/jaynshare"),
-        1,
-        "the image registry is named only by the `OCI_REPOSITORY` constant"
     );
 
     // `status --json` carries no member naming a release check, an update or
@@ -331,7 +324,7 @@ async fn an_idle_server_makes_no_release_request() {
 // ------------------------------------------------------------------ scenarios
 
 /// One release set, one version, only the allowed files:
-/// `tools/release/build.py` produces the seven artifacts plus
+/// `tools/release/build.py` produces the six artifacts plus
 /// the three release-set files, each archive holding exactly its
 /// four entries, the host archive's executable being the binary under test,
 /// and `release verify` accepting the set under the minted key.
@@ -403,7 +396,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
         "the four placeholder targets are announced on stderr: {stderr}"
     );
 
-    // Exactly the seven artifacts plus the three release-set files.
+    // Exactly the six artifacts plus the three release-set files.
     let mut files: Vec<String> = std::fs::read_dir(&out)
         .expect("release directory")
         .map(|entry| {
@@ -431,10 +424,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
                 format!("jaynshare-{version}-{target}.tar.gz")
             }
         })
-        .chain([
-            format!("jaynshare-{version}-client-kit.zip"),
-            format!("jaynshare-{version}-compose.zip"),
-        ])
+        .chain([format!("jaynshare-{version}-client-kit.zip")])
         .collect::<Vec<_>>();
     artifacts.sort();
     let mut expected = artifacts.clone();
@@ -536,7 +526,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     );
 
     // Release.json parses, agrees with SHA256SUMS, and carries the
-    // seven artifacts.
+    // six artifacts.
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(out.join("release.json")).expect("read release.json"),
     )
@@ -546,7 +536,7 @@ async fn one_release_set_one_version_only_the_allowed_files() {
     assert_eq!(manifest["commit"], commit);
     assert_eq!(
         manifest["artifacts"].as_array().expect("artifacts").len(),
-        7
+        6
     );
     let sums = std::fs::read(out.join("SHA256SUMS")).expect("read SHA256SUMS");
     assert_eq!(
@@ -1144,411 +1134,11 @@ async fn release_verify_refuses_any_mismatch_before_execution() {
     assert!(json_runs >= 1, "--json must have run at least once");
 }
 
-use crate::linux_fx::{docker, docker_available, docker_platform, head_commit, linux_binary};
-use std::net::TcpListener as StdTcpListener;
-use std::time::{Duration, Instant};
-
-/// A local `registry:2` the release tool pushes to and `container install`
-/// reads from; `Drop` removes the container whatever the outcome.
-struct Registry {
-    name: String,
-}
-
-impl Drop for Registry {
-    fn drop(&mut self) {
-        let _ = docker(&["rm", "-f", &self.name]);
-    }
-}
-
-fn start_registry(port: u16) -> Result<Registry, String> {
-    let name = format!("jaynshare-release-set-version-b-{port}");
-    let output = docker(&[
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        &name,
-        "-p",
-        &format!("{port}:5000"),
-        "registry:2",
-    ])?;
-    if !output.status.success() {
-        return Err(format!(
-            "registry:2: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let registry = Registry { name: name.clone() };
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let probe = docker(&[
-            "exec",
-            &name,
-            "wget",
-            "-q",
-            "-O-",
-            "http://127.0.0.1:5000/v2/",
-        ])?;
-        if probe.status.success() {
-            return Ok(registry);
-        }
-        if Instant::now() > deadline {
-            return Err("registry:2 never answered /v2/ within 120 s".to_owned());
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-}
-
-/// The release tool builds the linux/amd64+arm64 OCI index
-/// from the release's own musl binaries, records every digest in the signed
-/// `release.json`, pins the Compose kit to the index digest, and the pushed
-/// index is the recorded one. `container install` against the real
-/// daemon then gets past the full release verification and refuses the
-/// stand-in repository at `release.image` (the product only ships the
-/// official repository — see the conflict note in the scenario), having
-/// started no project.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_oci_index_is_recorded_and_pinned() {
-    let _leak_sweep = crate::leaks::LeakGuard::default();
-    if !docker_available() {
-        eprintln!("skipping: container: no Docker daemon runs a container within 120 s");
-        return;
-    }
-    let python_ok = std::process::Command::new("python3")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    if !python_ok {
-        eprintln!("skipping: python3 is absent");
-        return;
-    }
-
-    let root = scratch("release-set-version-b");
-    let home = root.join("home");
-    let (_, musl) = docker_platform().expect("docker platform");
-    let repository = {
-        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind a free port");
-        let port = listener.local_addr().expect("the bound address").port();
-        format!("localhost:{port}/jaynshare")
-    };
-    let port: u16 = repository
-        .split(':')
-        .nth(1)
-        .and_then(|p| p.split('/').next())
-        .and_then(|p| p.parse().ok())
-        .expect("the port in the repository");
-    let registry = start_registry(port).expect("start the local registry");
-    let _ = &registry;
-
-    let seed = root.join("seed.bin");
-    let public = root.join("release.pub");
-    let minted = std::process::Command::new("python3")
-        .args([
-            "tools/make-client-kit.py",
-            "keygen",
-            "--pub",
-            &public.display().to_string(),
-            "--seed",
-            &seed.display().to_string(),
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("run make-client-kit.py keygen");
-    assert!(
-        minted.status.success(),
-        "keygen: {}",
-        String::from_utf8_lossy(&minted.stderr)
-    );
-
-    let version = "0.7.0";
-    let commit = head_commit();
-    let out = root.join("out");
-    let image_out = root.join("image");
-    let built = std::process::Command::new("python3")
-        .args([
-            "tools/release/build.py",
-            "--version",
-            version,
-            "--commit",
-            &commit,
-            "--key",
-            &seed.display().to_string(),
-            "--bin",
-            &format!(
-                "{musl}={}",
-                linux_binary().expect("the musl binary").display()
-            ),
-            "--image-repository",
-            &repository,
-            "--image-push",
-            "--image-out",
-            &image_out.display().to_string(),
-            "--out",
-            &out.display().to_string(),
-            "--allow-placeholder",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("run build.py");
-    assert!(
-        built.status.success(),
-        "build.py: {}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-
-    // The signed manifest records the image: repository, tag, index digest
-    // and both platforms.
-    let manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(out.join("release.json")).expect("read release.json"),
-    )
-    .expect("release.json parses");
-    let image = &manifest["image"];
-    assert_eq!(image["repository"], repository.as_str(), "image.repository");
-    assert_eq!(image["tag"], version, "image.tag");
-    let index_digest = image["index_digest"].as_str().expect("index_digest");
-    assert!(index_digest.starts_with("sha256:") && index_digest.len() == 7 + 64);
-    let platforms: Vec<&str> = image["platforms"]
-        .as_array()
-        .expect("platforms")
-        .iter()
-        .map(|p| p["platform"].as_str().expect("platform"))
-        .collect();
-    assert_eq!(
-        platforms,
-        ["linux/amd64", "linux/arm64"],
-        "both platforms, sorted"
-    );
-    for platform in image["platforms"].as_array().expect("platforms") {
-        for field in ["manifest_digest", "config_digest"] {
-            let digest = platform[field].as_str().expect(field);
-            assert!(
-                digest.starts_with("sha256:") && digest.len() == 7 + 64,
-                "{field}"
-            );
-        }
-        let layers = platform["layer_digests"].as_array().expect("layers");
-        assert!(!layers.is_empty(), "layer_digests");
-        for digest in layers {
-            let digest = digest.as_str().expect("layer digest");
-            assert!(digest.starts_with("sha256:") && digest.len() == 7 + 64);
-        }
-    }
-
-    // The pushed index is the recorded one, byte for byte.
-    let pinned = format!("{repository}@{index_digest}");
-    let inspected =
-        docker(&["buildx", "imagetools", "inspect", "--raw", &pinned]).expect("imagetools inspect");
-    assert!(
-        inspected.status.success(),
-        "inspect: {}",
-        String::from_utf8_lossy(&inspected.stderr)
-    );
-    let index_bytes: Vec<u8> = inspected.stdout;
-    assert_eq!(
-        crate::release_fx::sha256_hex(&index_bytes),
-        index_digest["sha256:".len()..],
-        "the pushed index hashes to the recorded index digest"
-    );
-    let index: Value = serde_json::from_slice(&index_bytes).expect("the index parses");
-    for recorded in image["platforms"].as_array().expect("platforms") {
-        let served = index["manifests"]
-            .as_array()
-            .expect("index manifests")
-            .iter()
-            .find(|m| {
-                format!(
-                    "{}/{}",
-                    m["platform"]["os"].as_str().unwrap_or(""),
-                    m["platform"]["architecture"].as_str().unwrap_or("")
-                ) == recorded["platform"].as_str().expect("platform")
-            })
-            .expect("the index serves the recorded platform");
-        assert_eq!(
-            served["digest"].as_str().expect("manifest digest"),
-            recorded["manifest_digest"]
-                .as_str()
-                .expect("recorded digest"),
-            "{}: the index serves the recorded manifest digest",
-            recorded["platform"]
-        );
-    }
-
-    // The Compose kit pins the index digest: exactly one `image:` line, no
-    // `check.sh` member (the gate moved to `tools/release/check-compose-kit.sh`).
-    let kit = out.join(format!("jaynshare-{version}-compose.zip"));
-    let file = std::fs::File::open(&kit).expect("open the kit");
-    let mut archive = zip::ZipArchive::new(file).expect("read the kit");
-    let members: Vec<String> = (0..archive.len())
-        .map(|i| archive.by_index(i).expect("member").name().to_string())
-        .collect();
-    assert!(
-        !members.iter().any(|name| name.ends_with("check.sh")),
-        "the kit ships no check script: {members:?}"
-    );
-    let compose = {
-        let mut member = archive.by_name("compose.yaml").expect("compose.yaml");
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut member, &mut text).expect("compose.yaml text");
-        text
-    };
-    let image_lines: Vec<&str> = compose
-        .lines()
-        .filter(|line| line.trim_start().starts_with("image:"))
-        .collect();
-    assert_eq!(image_lines.len(), 1, "exactly one image: line: {compose}");
-    assert_eq!(
-        image_lines[0].trim(),
-        format!("image: \"{repository}@{index_digest}\""),
-        "the kit pins the recorded index digest"
-    );
-
-    // Only the release set: the image lives in --image-out, the release in
-    // --out.
-    let mut files: Vec<String> = std::fs::read_dir(&out)
-        .expect("release directory")
-        .map(|entry| {
-            entry
-                .expect("entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    files.sort();
-    let targets = [
-        "x86_64-unknown-linux-musl",
-        "aarch64-unknown-linux-musl",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-        "x86_64-pc-windows-msvc",
-    ];
-    let mut expected: Vec<String> = targets
-        .iter()
-        .map(|target| {
-            if *target == "x86_64-pc-windows-msvc" {
-                format!("jaynshare-{version}-{target}.zip")
-            } else {
-                format!("jaynshare-{version}-{target}.tar.gz")
-            }
-        })
-        .chain([
-            format!("jaynshare-{version}-client-kit.zip"),
-            format!("jaynshare-{version}-compose.zip"),
-            "SHA256SUMS".to_owned(),
-            "release.json".to_owned(),
-            "release.json.minisig".to_owned(),
-        ])
-        .collect();
-    expected.sort();
-    assert_eq!(files, expected, "only the release set in --out");
-    let tar = std::path::Path::new(&image_out).join("image.oci.tar");
-    assert!(tar.is_file(), "--image-out holds the OCI layout tar");
-
-    // The whole release set verifies under the planted key.
-    let config = crate::bundle::config_root(&home);
-    crate::harness::private_dir(&config);
-    std::fs::write(
-        config.join("release.pub"),
-        std::fs::read(&public).expect("read the minted public key"),
-    )
-    .expect("plant release.pub");
-    let (code, stdout, stderr) = cli_raw(
-        &["release", "verify", &out.display().to_string()],
-        &isolated_env(&home),
-        None,
-    );
-    assert_eq!(code, 0, "{stdout}{stderr}");
-
-    // `container install` against the real daemon: the release verifies, then
-    // the product's `verify_image` refuses the stand-in repository
-    // `src/deploy/container.rs` only admits "ghcr.io/jaynlabs/jaynshare"
-    // (line ~250), so a local-registry release stops at `release.image`
-    // (exit 17) instead of a first `preflight.*` stop; every digest the
-    // release records and pushes is already checked above against the
-    // registry itself.
-    let config_file = root.join("config.toml");
-    std::fs::write(&config_file, "name = \"pool\"\n").expect("the configuration");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&config_file, std::fs::Permissions::from_mode(0o600))
-            .expect("0600 config");
-    }
-    let kit_path = out.join(format!("jaynshare-{version}-compose.zip"));
-    let (code, stdout, stderr) = cli_raw(
-        &[
-            "--config",
-            &config_file.display().to_string(),
-            "--json",
-            "container",
-            "install",
-            "--project",
-            "release-set-version-b",
-            "--from",
-            &kit_path.display().to_string(),
-            "--publish",
-            "127.0.0.1:21400",
-        ],
-        &isolated_env(&home),
-        None,
-    );
-    assert_eq!(code, 17, "the repository refusal: {stdout}{stderr}");
-    let envelope: Value =
-        serde_json::from_str(stdout.trim()).expect("the install failure envelope");
-    let checks: Vec<&Value> = envelope["error"]["details"][0]["checks"]
-        .as_array()
-        .expect("the checks")
-        .iter()
-        .collect();
-    // names the one OCI repository, so a stand-in registry stops at
-    // the first image check, `release.image`, after the whole release
-    // verification passed.
-    let failed: Vec<&Value> = checks
-        .iter()
-        .filter(|check| check["passed"] != true)
-        .copied()
-        .collect();
-    assert_eq!(failed.len(), 1, "one refusal: {checks:?}");
-    assert_eq!(
-        failed[0]["name"], "release.image",
-        "the first refusal names the repository: {checks:?}"
-    );
-    assert!(
-        failed[0]["message"]
-            .as_str()
-            .expect("message")
-            .contains(&repository),
-        "the refusal names the stand-in repository: {checks:?}"
-    );
-    // Every other release.* check — the whole release verification — passes
-    // before the repository refusal.
-    assert!(
-        checks
-            .iter()
-            .filter(|check| check["name"].as_str().unwrap_or("").starts_with("release."))
-            .all(|check| check["name"] == "release.image" || check["passed"] == true),
-        "every other release.* check passes: {checks:?}"
-    );
-
-    // Nothing started: `docker compose ls` knows no release-set-version-b project.
-    let listing = docker(&["compose", "ls", "--format", "json"]).expect("docker compose ls");
-    assert!(listing.status.success(), "compose ls");
-    let projects: Value = serde_json::from_slice(&listing.stdout).expect("compose ls JSON");
-    assert!(
-        !projects
-            .as_array()
-            .expect("compose ls array")
-            .iter()
-            .any(|p| p["Name"].as_str() == Some("release-set-version-b")),
-        "no release-set-version-b project runs: {}",
-        String::from_utf8_lossy(&listing.stdout)
-    );
-}
+use crate::linux_fx::head_commit;
 
 // ------------------------------------------------------------------ publish.sh
 
-/// `publish.sh`'s call sequence with fake `docker` and `gh` on `PATH` and a
+/// `publish.sh`'s call sequence with a fake `gh` on `PATH` and a
 /// fake `cross.sh` (`JAYNSHARE_CROSS`): one `build.py` call carries the
 /// version, the signing key and all five `--bin` lines, and `gh release
 /// create` receives absolute asset paths and creates the tag at the built
@@ -1634,8 +1224,6 @@ fn publish_script_runs_cross_build_publish_in_order() {
             .arg("0.7.1-rc.1+build.7")
             .arg("--key")
             .arg(seed)
-            .arg("--image-repository")
-            .arg("ghcr.io/jaynlabs/jaynshare")
             .env("JAYNSHARE_CROSS", &fake_cross)
             .env("PATH", &path)
             .env("FAKE_TOOL_DIR", &tools.dir)

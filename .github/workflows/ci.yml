@@ -23,48 +23,9 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --bins
       - run: cargo build --locked --release
-      # The platform image builds in a docker-container BuildKit, as the
-      # release does (tools/release/build.py): the runner engine's embedded
-      # one ignores `COPY --chmod` on a copied directory.
-      - run: docker buildx create --name jaynshare-repro --driver docker-container --driver-opt network=host --use --bootstrap
       - name: acceptance tests (against the release artefact)
         run: cargo test --locked --release --test acceptance
         env: { JAYNSHARE_BIN: target/release/jaynshare }
-  image:
-    timeout-minutes: 20
-    # The Linux release targets are musl: the platform image is built from
-    # `scratch`, which has no dynamic loader. Building here keeps the release
-    # artefact off anyone's laptop.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - run: rustup target add x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
-      - name: stage the binary per architecture
-        run: |
-          mkdir -p oci/amd64
-          cp target/x86_64-unknown-linux-musl/release/jaynshare oci/amd64/
-      - name: build the platform image
-        run: |
-          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          docker build --build-context bin=oci \
-            --build-arg "VERSION=$version" \
-            --build-arg "COMMIT=$GITHUB_SHA" \
-            -f Dockerfile -t jaynshare:ci .
-      - name: the image holds exactly the four permitted files
-        run: |
-          # docker export injects its own runtime files (resolv.conf, hosts,
-          # hostname, mtab, .dockerenv, dev/console) into the created container.
-          # They are not image layers, so the check is about what remains.
-          docker create --name probe jaynshare:ci
-          docker export probe | tar -t | grep -v '/$' \
-            | grep -vE '^(\.dockerenv|dev/console|etc/(hostname|hosts|mtab|resolv\.conf))$' \
-            | sort > /tmp/files.txt
-          docker rm probe
-          cat /tmp/files.txt
-          diff <(printf 'LICENSE\nNOTICE.md\netc/ssl/certs/ca-certificates.crt\nusr/local/bin/jaynshare\n') /tmp/files.txt
   deny:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -143,7 +143,7 @@ pub fn judge_platform(os: &str, arch: &str, systemd_booted: bool, operation: &st
     } else {
         Check::fail(
             "preflight.systemd",
-            "systemd is not PID 1 here (/run/systemd/system is absent), so a native install is refused and nothing was written; the rootless Docker Compose deployment (`jaynshare container install`) is the supported path",
+            "systemd is not PID 1 here (/run/systemd/system is absent), so the install is refused and nothing was written: the server runs only under systemd",
         )
     });
     checks
@@ -1939,7 +1939,7 @@ mod tests {
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(failed, ["preflight.systemd"]);
-        assert!(no_systemd[1].message.contains("container install"));
+        assert!(no_systemd[1].message.contains("nothing was written"));
     }
 
     const GOOD_PASSWD: &str =

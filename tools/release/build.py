@@ -13,8 +13,6 @@ Writes into `--out`:
   holding exactly the executable, LICENSE, NOTICE.md and a README.txt;
 - `jaynshare-<version>-client-kit.zip`, with the installers of
   `deploy/kit/` plus the client executables;
-- `jaynshare-<version>-compose.zip`, from `tools/release/compose-kit/` when
-  that directory exists, else a placeholder kit;
 - `SHA256SUMS`, canonical `release.json` and `release.json.minisig`;
 - with `--next-key`, the key-rotation overlap: `release.json` names the
   next key id, and `release.json.<next-key-id>.minisig` and
@@ -34,7 +32,6 @@ import io
 import json
 import os
 import re
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -209,212 +206,11 @@ def client_kit(version: str, commit: str, seed_path: str, bins: dict, allow: boo
     return kit_bytes, members
 
 
-def compose_kit(version: str, image_reference: str | None) -> bytes:
-    """The Compose kit from `tools/release/compose-kit/`, `compose.yaml`'s
-    `@IMAGE@` replaced by `image_reference` when one is given; with
-    none it keeps the placeholder and the caller warns."""
-    source = os.path.join(REPO, "tools", "release", "compose-kit")
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        if os.path.isdir(source):
-            for root, _, files in os.walk(source):
-                for name in sorted(files):
-                    path = os.path.join(root, name)
-                    with open(path, "rb") as handle:
-                        data = handle.read()
-                    if name == "compose.yaml" and image_reference is not None:
-                        data = data.replace(b"@IMAGE@", image_reference.encode())
-                    archive.writestr(os.path.relpath(path, source), data)
-        else:
-            archive.writestr(
-                "README.txt",
-                "placeholder: no Compose kit in this release; "
-                "tools/release/compose-kit/ does not exist\n",
-            )
-    return buffer.getvalue()
-
-
-def commit_time(commit: str) -> str:
-    """`SOURCE_DATE_EPOCH`: the commit's author time, or `0` when that commit
-    is not in this checkout."""
-    try:
-        done = subprocess.run(
-            ["git", "show", "-s", "--format=%ct", commit],
-            cwd=REPO, capture_output=True, check=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return "0"
-    line = done.stdout.decode().strip()
-    return line if line.isdigit() else "0"
-
-
-def _docker_buildx(args: list[str]) -> None:
-    done = subprocess.run(args, cwd=REPO)
-    if done.returncode != 0:
-        sys.exit(f"docker buildx build exited {done.returncode}")
-
-
-def _builder() -> str:
-    """A reproducible multi-output builder: the default `docker` driver's
-    containerd store unpacks every exported image, and unpacking conflicts
-    with `rewrite-timestamp`, so the image builds run in a `docker-container`
-    BuildKit (created once, idempotent)."""
-    name = "jaynshare-repro"
-    done = subprocess.run(
-        ["docker", "buildx", "inspect", name], cwd=REPO, capture_output=True
-    )
-    if done.returncode != 0:
-        subprocess.run(
-            ["docker", "buildx", "create", "--name", name,
-             "--driver", "docker-container", "--driver-opt", "network=host",
-             "--bootstrap"],
-            cwd=REPO, check=True,
-        )
-    return name
-
-
-def read_oci_layout(tar_path: str, repository: str, version: str) -> dict:
-    """The `image` record from an OCI layout tarball: the index digest
-    and, per platform, the manifest, configuration and layer digests, every
-    one checked by hashing the blob's exact bytes."""
-
-    def refuse(message: str):
-        sys.exit(f"{tar_path}: {message}")
-
-    with tarfile.open(tar_path, "r") as archive:
-        names = {m.name for m in archive.getmembers()}
-
-        def blob(digest: str) -> bytes:
-            algo, _, hex_digest = digest.partition(":")
-            name = f"blobs/{algo}/{hex_digest}"
-            if name not in names:
-                refuse(f"the layout has no blob {name}")
-            data = archive.extractfile(name).read()
-            actual = f"{algo}:{hashlib.sha256(data).hexdigest()}"
-            if actual != digest:
-                refuse(f"{name} hashes to {actual}, not {digest}")
-            return data
-
-        if "index.json" not in names:
-            refuse("the layout has no index.json")
-        descriptors = json.loads(archive.extractfile("index.json").read())
-        entries = descriptors.get("manifests") or []
-        if len(entries) != 1:
-            refuse(f"index.json holds {len(entries)} descriptors, not one")
-        if entries[0].get("mediaType") != "application/vnd.oci.image.index.v1+json":
-            refuse(
-                f"index.json's descriptor is {entries[0].get('mediaType')!r}, "
-                "not an image index"
-            )
-        index_digest = entries[0]["digest"]
-        index = json.loads(blob(index_digest))
-        # Exactly the two platform manifests: an attestation manifest or any
-        # other entry is refused: one image per architecture.
-        manifests = index.get("manifests") or []
-        if len(manifests) != 2:
-            refuse(f"the index lists {len(manifests)} manifests, not the two platforms")
-        platforms = []
-        for manifest in manifests:
-            platform = manifest.get("platform") or {}
-            name = f"{platform.get('os')}/{platform.get('architecture')}"
-            if name not in ("linux/amd64", "linux/arm64"):
-                refuse(f"an index entry names {name}, not linux/amd64 or linux/arm64")
-            manifest_digest = manifest["digest"]
-            document = json.loads(blob(manifest_digest))
-            config_digest = document["config"]["digest"]
-            blob(config_digest)
-            layer_digests = [layer["digest"] for layer in document.get("layers") or []]
-            if not layer_digests:
-                refuse(f"{name}: the manifest lists no layer")
-            for digest in layer_digests:
-                blob(digest)
-            platforms.append(
-                {
-                    "platform": name,
-                    "manifest_digest": manifest_digest,
-                    "config_digest": config_digest,
-                    "layer_digests": layer_digests,
-                }
-            )
-        platforms.sort(key=lambda entry: entry["platform"])
-        return {
-            "repository": repository,
-            "tag": version,
-            "index_digest": index_digest,
-            "platforms": platforms,
-        }
-
-
-def build_image(version: str, commit: str, repository: str, push: bool,
-                image_out: str, bins: dict, allow: bool) -> dict:
-    """One OCI index for linux/amd64 and linux/arm64 from the release's
-    own musl binaries; `push` publishes it and pins the pushed index to the
-    recorded digest."""
-    work = tempfile.mkdtemp(prefix="jaynshare-image-")
-    try:
-        for architecture, target in [("amd64", "x86_64-unknown-linux-musl"),
-                                     ("arm64", "aarch64-unknown-linux-musl")]:
-            if bins.get(target) is not None:
-                data = bins[target]
-            elif allow:
-                data = placeholder_executable(target)
-            else:
-                sys.exit(f"{target}: --image-repository needs --bin for both musl "
-                         f"targets (and no --allow-placeholder)")
-            directory = os.path.join(work, "bin", architecture)
-            os.makedirs(directory)
-            with open(os.path.join(directory, "jaynshare"), "wb") as sink:
-                sink.write(data)
-        os.makedirs(image_out, exist_ok=True)
-        tar_path = os.path.join(image_out, "image.oci.tar")
-        base = [
-            "docker", "buildx", "build",
-            "--builder", _builder(),
-            "--platform", "linux/amd64,linux/arm64",
-            "--provenance=false", "--sbom=false",
-            "--build-context", f"bin={os.path.join(work, 'bin')}",
-            "--build-arg", f"VERSION={version}",
-            "--build-arg", f"COMMIT={commit}",
-            "--build-arg", f"SOURCE_DATE_EPOCH={commit_time(commit)}",
-            "-f", os.path.join(REPO, "Dockerfile"),
-        ]
-        outputs = [
-            "--output=type=oci,dest=" + tar_path + ",rewrite-timestamp=true",
-        ]
-        if push:
-            outputs.append(
-                "--output=type=image,name=" + repository + ":" + version
-                + ",push=true,rewrite-timestamp=true"
-            )
-        _docker_buildx(base + outputs + [REPO])
-        record = read_oci_layout(tar_path, repository, version)
-        if push:
-            done = subprocess.run(
-                ["docker", "buildx", "imagetools", "inspect", "--raw",
-                 f"{repository}@{record['index_digest']}"],
-                cwd=REPO, capture_output=True,
-            )
-            pushed = done.stdout
-            if (done.returncode != 0
-                    or hashlib.sha256(pushed).hexdigest()
-                    != record["index_digest"].split(":", 1)[1]):
-                sys.exit(
-                    "the pushed index is not the recorded one: "
-                    f"{repository}@{record['index_digest']}"
-                )
-        return record
-    finally:
-        import shutil
-
-        shutil.rmtree(work, ignore_errors=True)
-
-
 # ------------------------------------------------------------------ the build
 
 
 def build_release(version: str, commit: str, seed_path: str, bins: dict,
-                  out: str, allow: bool, repository: str | None = None,
-                  push: bool = False, image_out: str | None = None,
+                  out: str, allow: bool,
                   next_seed_path: str | None = None) -> None:
     def read_seed(path: str) -> bytes:
         with open(path, "rb") as handle:
@@ -434,16 +230,6 @@ def build_release(version: str, commit: str, seed_path: str, bins: dict,
         if next_id == key_id:
             sys.exit("--next-key: the next key is the signing key")
 
-    if repository is not None:
-        image_record = build_image(version, commit, repository, push,
-                                   image_out, bins, allow)
-        compose_image = f"{repository}@{image_record['index_digest']}"
-    else:
-        image_record = None
-        compose_image = None
-        print("warning: the release has no image (--image-repository absent): "
-              "the Compose kit keeps the @IMAGE@ placeholder", file=sys.stderr)
-
     artifacts: list[tuple[str, str, str | None, bytes, list]] = []  # name, purpose, target, data, members
     for target in RELEASE_TARGETS:
         if bins.get(target) is not None:
@@ -461,8 +247,6 @@ def build_release(version: str, commit: str, seed_path: str, bins: dict,
     kit_bytes, kit_members = client_kit(version, commit, seed_path, bins, allow)
     artifacts.append((f"jaynshare-{version}-client-kit.zip", "client-kit", None,
                       kit_bytes, kit_members))
-    artifacts.append((f"jaynshare-{version}-compose.zip", "compose-kit", None,
-                      compose_kit(version, compose_image), []))
 
     artifacts.sort(key=lambda a: a[0].encode())
     sums = b"".join(
@@ -488,8 +272,6 @@ def build_release(version: str, commit: str, seed_path: str, bins: dict,
             for name, purpose, target, data, members in artifacts
         ],
     }
-    if image_record is not None:
-        manifest_root["image"] = image_record
     if next_seed is not None:
         manifest_root["next_key_id"] = next_id
     manifest = mk.canonical_json(manifest_root)
@@ -512,102 +294,6 @@ def build_release(version: str, commit: str, seed_path: str, bins: dict,
           + "".join(f", {name}" for name, _ in overlap))
 
 
-def hand_built_layout(work: str, corrupt: bool = False) -> str:
-    """A hand-built OCI layout tar for the reader's self-test (no Docker):
-    two platform manifests over two layers each, one index, `index.json`."""
-    def blob(name: str, data: bytes) -> str:
-        digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
-        path = os.path.join(work, "blobs", "sha256", digest.split(":")[1])
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as handle:
-            handle.write(data)
-        return digest
-
-    def manifest(config_digest: str, layer_digests: list[str]) -> bytes:
-        return json.dumps(
-            {
-                "schemaVersion": 2,
-                "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "config": {
-                    "mediaType": "application/vnd.oci.image.config.v1+json",
-                    "digest": config_digest,
-                    "size": 8,
-                },
-                "layers": [
-                    {"mediaType": "application/vnd.oci.image.layer.v1.tar",
-                     "digest": digest, "size": 8}
-                    for digest in layer_digests
-                ],
-            }
-        ).encode()
-
-    config_digest = blob("config", b"{}")
-    manifests = []
-    for architecture, layer_a, layer_b in [
-        ("amd64", b"layer 1", b"layer 2"), ("arm64", b"layer 3", b"layer 4")
-    ]:
-        digests = [blob("", layer_a), blob("", layer_b)]
-        bytes_ = manifest(config_digest, digests)
-        manifest_digest = blob("", bytes_)
-        manifests.append(
-            {
-                "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "digest": manifest_digest,
-                "size": len(bytes_),
-                "platform": {"architecture": architecture, "os": "linux"},
-            }
-        )
-    index = json.dumps(
-        {
-            "schemaVersion": 2,
-            "mediaType": "application/vnd.oci.image.index.v1+json",
-            "manifests": [
-                {
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
-                    "digest": manifest_digest,
-                    "size": 8,
-                    "platform": platform,
-                }
-                for manifest_digest, platform in
-                zip([m["digest"] for m in manifests],
-                    [m["platform"] for m in manifests])
-            ],
-        }
-    ).encode()
-    index_digest = blob("", index)
-    with open(os.path.join(work, "index.json"), "w") as handle:
-        json.dump(
-            {
-                "schemaVersion": 2,
-                "mediaType": "application/vnd.oci.image.index.v1+json",
-                "manifests": [
-                    {
-                        "mediaType": "application/vnd.oci.image.index.v1+json",
-                        "digest": index_digest,
-                        "size": len(index),
-                    }
-                ],
-            },
-            handle,
-        )
-    tar_path = os.path.join(work, "image.oci.tar")
-    if corrupt:
-        blobs = os.path.join(work, "blobs", "sha256")
-        victim = os.path.join(blobs, sorted(os.listdir(blobs))[1])
-        with open(victim, "ab") as handle:
-            handle.write(b"!")
-    with tarfile.open(tar_path, "w") as archive:
-        for root, _, files in os.walk(work):
-            for name in sorted(files):
-                if name.endswith(".oci.tar"):
-                    continue
-                path = os.path.join(root, name)
-                info = tarfile.TarInfo(os.path.relpath(path, work))
-                info.size = os.path.getsize(path)
-                archive.addfile(info, open(path, "rb"))
-    return tar_path
-
-
 # ------------------------------------------------------------------ self-test
 
 
@@ -627,7 +313,6 @@ def self_test() -> None:
             [archive_name("1.2.3", t) for t in RELEASE_TARGETS]
             + [
                 "jaynshare-1.2.3-client-kit.zip",
-                "jaynshare-1.2.3-compose.zip",
                 "SHA256SUMS",
                 "release.json",
                 "release.json.minisig",
@@ -650,7 +335,7 @@ def self_test() -> None:
         assert manifest["commit"] == "0123456789abcdef0123456789abcdef01234567"
         assert re.fullmatch(r"[0-9A-F]{16}", manifest["key_id"])
         assert manifest["sha256sums_sha256"] == hashlib.sha256(read("SHA256SUMS")).hexdigest()
-        assert len(manifest["artifacts"]) == 7
+        assert len(manifest["artifacts"]) == 6
         kit_entry = next(a for a in manifest["artifacts"] if a["purpose"] == "client-kit")
         with zipfile.ZipFile(io.BytesIO(read("jaynshare-1.2.3-client-kit.zip"))) as archive:
             assert [m["path"] for m in kit_entry["members"]] == sorted(archive.namelist())
@@ -678,27 +363,6 @@ def self_test() -> None:
             else:
                 with tarfile.open(fileobj=io.BytesIO(read(name)), mode="r:gz") as archive:
                     assert set(archive.getnames()) == expected_entries | {root}, name
-
-        # The OCI reader over a hand-built layout tar (no Docker): the record
-        # names the digests it hashes, and a tampered blob is refused.
-        repository = "ghcr.io/jaynlabs/jaynshare"
-        record = read_oci_layout(hand_built_layout(os.path.join(work, "layout")),
-                                 repository, "1.2.3")
-        assert record["repository"] == repository and record["tag"] == "1.2.3"
-        assert [p["platform"] for p in record["platforms"]] == ["linux/amd64", "linux/arm64"]
-        for platform in record["platforms"]:
-            assert platform["config_digest"].startswith("sha256:")
-            assert len(platform["layer_digests"]) == 2
-            for digest in platform["layer_digests"]:
-                assert digest.startswith("sha256:")
-        try:
-            read_oci_layout(
-                hand_built_layout(os.path.join(work, "tampered"), corrupt=True),
-                repository, "1.2.3",
-            )
-            raise AssertionError("a tampered layout is refused")
-        except SystemExit:
-            pass
 
         # The overlap names the next key and both signatures hold.
         next_seed = os.path.join(work, "next.bin")
@@ -730,9 +394,6 @@ def main() -> None:
     parser.add_argument("--key")
     parser.add_argument("--bin", action="append", default=[])
     parser.add_argument("--out")
-    parser.add_argument("--image-repository")
-    parser.add_argument("--image-push", action="store_true")
-    parser.add_argument("--image-out")
     parser.add_argument("--allow-placeholder", action="store_true")
     parser.add_argument("--next-key")
     parser.add_argument("--self-test", action="store_true")
@@ -748,10 +409,6 @@ def main() -> None:
         sys.exit("--key <seed file> is required")
     if not args.out:
         sys.exit("--out <dir> is required")
-    if args.image_push and not args.image_repository:
-        sys.exit("--image-push needs --image-repository <repo>")
-    if (args.image_repository or args.image_out) and not args.image_out:
-        sys.exit("--image-repository needs --image-out <dir>")
     bins: dict = {target: None for target in RELEASE_TARGETS}
     for item in args.bin:
         target, separator, path = item.partition("=")
@@ -761,8 +418,7 @@ def main() -> None:
         with open(path, "rb") as handle:
             bins[target] = handle.read()
     build_release(args.version, args.commit, args.key, bins, args.out,
-                  args.allow_placeholder, args.image_repository,
-                  args.image_push, args.image_out, args.next_key)
+                  args.allow_placeholder, args.next_key)
 
 
 if __name__ == "__main__":

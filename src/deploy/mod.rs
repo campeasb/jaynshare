@@ -1,15 +1,13 @@
 //! The deployment layer: the release set and its verification, the
-//! private-network preflight, the native server lifecycle, the container
-//! deployment and the OS trust store. Every verb here is file-backed on the
-//! machine that runs it and reports [`result::DeployResult`].
+//! private-network preflight, the native server lifecycle and the OS trust
+//! store. Every verb here is file-backed on the machine that runs it and
+//! reports [`result::DeployResult`].
 //!
-//! Platform tools are invoked by name from `PATH` (`systemctl`, `docker`,
-//! `nft`, `security`, `certutil`, `icacls`, …), one wrapper
-//! function per tool, so the test suite's fakes answer only what that wrapper asks.
+//! Platform tools are invoked by name from `PATH` (`systemctl`, `nft`,
+//! `security`, `certutil`, `icacls`, …), one wrapper function per tool, so
+//! the test suite's fakes answer only what that wrapper asks.
 
 pub mod address;
-pub mod compose;
-pub mod container;
 pub mod firewall;
 pub mod native;
 pub mod preflight;

@@ -99,7 +99,7 @@ fn check_out(out: &Path, client_id: Option<&str>) -> Result<(), Failure> {
 
 /// The origins from the configuration read: the base-URL and proxy
 /// listener origins the manifest records, or the advertised origins
-/// the operator configured for a published container listener. An
+/// the operator configured for a forwarded listener. An
 /// origin is derived when its key is unset, and refused beside a wildcard
 /// bind — an unspecified listener address embeds an origin no client can
 /// reach.

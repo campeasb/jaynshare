@@ -161,8 +161,8 @@ pub struct MitmSettings {
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientSettings {
     pub enrollment_lifetime_seconds: u64,
-    /// The origins a client reaches when the listeners bind the
-    /// wildcard inside a published container.
+    /// The origins a client reaches when they differ from the listeners'
+    /// own addresses, as behind a forwarded port.
     pub advertised_base_url: Option<String>,
     pub advertised_proxy_url: Option<String>,
     /// The base-URL listener's PEM trust anchor, packaged as

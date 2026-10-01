@@ -96,7 +96,7 @@ async fn a_server_install_is_refused_where_it_is_not_supported() {
     let (code, _, stderr) = linux.cli(&["server", "install", "--from", &release]);
     assert_eq!(code, 18, "server install without systemd: {stderr}");
     assert!(stderr.contains("preflight.systemd"), "{stderr}");
-    assert!(stderr.contains("container install"), "{stderr}");
+    assert!(stderr.contains("only under systemd"), "{stderr}");
 
     for path in [
         "/opt/jaynshare",
@@ -490,24 +490,15 @@ async fn each_preflight_failure_is_reported_and_nothing_changes() {
     assert!(stderr.contains("unexpected argument"), "{stderr}");
     assert_eq!(digests(&linux), before, "the trees must not change");
 
-    // 2b. The two trust statements live in both installation guides. No
+    // 2b. The two trust statements live in the installation guide. No
     // command asks for them; installing after reading carries the obligation.
+    let server = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deploy/README-server.md"
+    ))
+    .expect("deploy/README-server.md");
     for text in ["Operator trust:", "Decision record:"] {
-        let server = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/deploy/README-server.md"
-        ))
-        .expect("deploy/README-server.md");
         assert!(server.contains(text), "{text} in deploy/README-server.md");
-        let kit = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tools/release/compose-kit/README.txt"
-        ))
-        .expect("tools/release/compose-kit/README.txt");
-        assert!(
-            kit.contains(text),
-            "{text} in tools/release/compose-kit/README.txt"
-        );
     }
     // 3. An unknown key: 3, configuration.valid, naming the key, no value.
     let before = digests(&linux);
@@ -1107,11 +1098,11 @@ async fn the_installed_unit_is_exact_and_a_second_install_is_idempotent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_closed_list_passes_at_every_boundary() {
     let _leak_sweep = crate::leaks::LeakGuard::default();
-    let Some(linux) = LinuxBox::start("container-wildcard-needs") else {
+    let Some(linux) = LinuxBox::start("closed-list-boundaries") else {
         return;
     };
-    const CONFIG: &str = "/root/container-wildcard-needs/config.toml";
-    linux.sh("mkdir -p /root/container-wildcard-needs && chmod 700 /root/container-wildcard-needs");
+    const CONFIG: &str = "/root/closed-list-boundaries/config.toml";
+    linux.sh("mkdir -p /root/closed-list-boundaries && chmod 700 /root/closed-list-boundaries");
     linux.write(CONFIG, b"version = 1\n", 0o600);
 
     let pass = [

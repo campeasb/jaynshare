@@ -30,7 +30,7 @@ server operator. No technical control makes an untrusted operator safe while
 keeping this routing design.
 
 The operator is whoever can reach the server's loopback listener or control its
-systemd unit, Docker daemon or Compose project. See
+systemd unit. See
 [the server installation notes](../deploy/README-server.md).
 
 ## Who can see or influence what?

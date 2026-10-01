@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>You can share your Claude subscriptions!</b><br>
-  <sub>Self-hosted · Linux &amp; Docker server · macOS &amp; Windows client</sub>
+  <sub>Self-hosted · Linux server · macOS &amp; Windows client</sub>
 </p>
 
 <p align="center">
@@ -77,13 +77,12 @@ a product of Anthropic.
   rotation and revocation
 - Private-network listeners only, optional TLS, and an audit log that never
   holds a body or a credential
-- Signed releases, a native systemd install and a rootless Docker Compose kit
+- Signed releases and a native systemd install
 - One Rust binary for the server and the client
 
 ## Requirements for self hosting
 
-- A Linux server with systemd, or rootless Docker Engine 28 (or newer) for the
-  Compose kit
+- A Linux server with systemd
 - A private network between the engineers and the server, such as a tailnet
   (but I'm sure you can make it work with other clever solutions)
 - Claude Code already installed on each engineer's machine
@@ -126,8 +125,7 @@ once. Send the two through separate private channels.
 
 The [server installation notes](deploy/README-server.md) cover the operator
 trust boundary, the decision record every pooled account needs, and the
-private-network rules jaynshare cannot enforce for you. The Compose kit in each
-release carries its own instructions.
+private-network rules jaynshare cannot enforce for you.
 
 ### Engineer
 
@@ -177,17 +175,15 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-CI runs the above and the platform image build; see
-`.github/workflows/ci.yml`. The acceptance tests that need Linux run in Docker
-and are skipped where no Docker daemon answers.
+CI runs the above; see `.github/workflows/ci.yml`. The acceptance tests that
+need Linux run in Docker and are skipped where no Docker daemon answers.
 
 Where things live:
 
 - `src/` — the server, the client and the CLI
-- `deploy/` — the reference Compose deployment, the server notes, the release
-  key (`release-key.pub`) and the client-kit installers (`kit/`)
+- `deploy/` — the server notes, the release key (`release-key.pub`) and the
+  client-kit installers (`kit/`)
 - `tools/release/` — cross-builds, packaging, signing and publishing
-- `Dockerfile` — the minimal platform image
 
 Issues and pull requests are welcome; open an issue before a large change.
 Report security issues privately as described in [SECURITY.md](SECURITY.md).

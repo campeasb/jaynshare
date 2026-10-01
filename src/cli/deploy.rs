@@ -5,9 +5,8 @@
 
 use serde_json::json;
 
-use super::args::{ContainerVerb, ReleaseVerb, ServerVerb, ServiceVerb, Verb};
+use super::args::{ReleaseVerb, ServerVerb, ServiceVerb, Verb};
 use super::{Cli, Failure, Outcome};
-use crate::deploy::container;
 use crate::deploy::native;
 use crate::deploy::result::DeployResult;
 use crate::deploy::systemd::{self, ServiceOp};
@@ -208,7 +207,6 @@ pub(super) fn dispatch(cli: &Cli, verb: &Verb) -> Option<Outcome> {
             }
             Some(finish(result, manager_row))
         }
-        Verb::Container { verb } => Some(container_verb(cli, verb, manager_row)),
         _ => None,
     }
 }
@@ -282,109 +280,6 @@ fn interactive_confirm(prompt: &str) -> Result<String, String> {
     })
 }
 
-/// `container *`: `--project` is validated locally first (exit 2).
-fn container_verb(cli: &Cli, verb: &ContainerVerb, default: (i32, &'static str)) -> Outcome {
-    let project = match verb {
-        ContainerVerb::Install { project, .. }
-        | ContainerVerb::Update { project, .. }
-        | ContainerVerb::Status { project }
-        | ContainerVerb::Backup { project, .. }
-        | ContainerVerb::Restore { project, .. }
-        | ContainerVerb::Uninstall { project, .. } => project.as_str(),
-    };
-    if let Some(failure) = project_failure(project) {
-        return Err(failure);
-    }
-    let result = match verb {
-        ContainerVerb::Install {
-            from,
-            publish,
-            cpus,
-            memory,
-            pids,
-            ..
-        } => {
-            let Some(config) = cli.config.as_deref() else {
-                return Err(Failure::local(
-                    2,
-                    "cli_usage",
-                    "`container install` needs the global --config <path>: the configuration it mounts read-only",
-                ));
-            };
-            let publish = parse_publications(publish)?;
-            let defaults = container::Limits::default();
-            let limits = container::Limits {
-                cpus: cpus.clone().unwrap_or(defaults.cpus),
-                memory: memory.clone().unwrap_or(defaults.memory),
-                pids: pids.unwrap_or(defaults.pids),
-            };
-            let claimed = claimed_version(&from.with_file_name("release.json"));
-            eprintln!(
-                "installing project {project} from {}: claims version {}, publish {}, config {}, cpus {}, memory {}, pids {}",
-                from.display(),
-                claimed.as_deref().unwrap_or("unknown"),
-                publish
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
-                config.display(),
-                limits.cpus,
-                limits.memory,
-                limits.pids
-            );
-            container::install(&container::InstallInputs {
-                project,
-                kit: from,
-                publish: &publish,
-                config,
-                limits,
-            })
-        }
-        ContainerVerb::Update { from, .. } => {
-            eprintln!("updating project {project} from {}", from.display());
-            container::update(project, from, cli.yes, &interactive_confirm)
-        }
-        ContainerVerb::Status { .. } => container::status(project),
-        ContainerVerb::Backup { out, .. } => {
-            eprintln!("backing up project {project} to {}", out.display());
-            container::backup(project, out)
-        }
-        ContainerVerb::Restore { from, .. } => {
-            eprintln!("restoring project {project} from {}", from.display());
-            container::restore(project, from)
-        }
-        ContainerVerb::Uninstall { purge, .. } => {
-            container::uninstall(project, *purge, &interactive_confirm)
-        }
-    };
-    finish(result, default)
-}
-
-/// One or two `host-ip:port` publications, comma-separated.
-fn parse_publications(text: &str) -> Result<Vec<std::net::SocketAddr>, Failure> {
-    let parts: Vec<&str> = text.split(',').collect();
-    if parts.is_empty() || parts.len() > 2 {
-        return Err(Failure::local(
-            2,
-            "cli_usage",
-            "--publish takes one or two host-ip:port values",
-        ));
-    }
-    parts
-        .iter()
-        .map(|part| {
-            part.trim().parse().map_err(|_| {
-                Failure::local(
-                    2,
-                    "cli_usage",
-                    format!("--publish {part:?} is not an explicit host-ip:port"),
-                )
-            })
-        })
-        .collect()
-}
-
 /// The exit row of a result: 20 when it rolled back, else the class its
 /// first failed check names (`<class>.<check>`), else the verb's default.
 fn exit_row(result: &DeployResult, default: (i32, &'static str)) -> (i32, &'static str) {
@@ -452,18 +347,6 @@ fn finish_with(result: DeployResult, default: (i32, &'static str), text: String)
     let mut failure = Failure::local(code, slug, message);
     failure.error["details"] = json!([result.to_json()]);
     Err(failure)
-}
-
-/// `--project` is validated locally against the project-name pattern before
-/// anything runs; the refusal is a usage error (2).
-fn project_failure(project: &str) -> Option<Failure> {
-    (!container::valid_project(project)).then(|| {
-        Failure::local(
-            2,
-            "cli_usage",
-            format!("--project {project:?} does not match [a-z0-9][a-z0-9_-]{{0,31}}"),
-        )
-    })
 }
 
 /// The version `release.json` claims (the plan line reads it but never
@@ -661,16 +544,5 @@ mod tests {
         assert!(unreadable_ruleset(dropped, &[listener], &tailscale0).is_none());
         // An unassigned address is an assignment failure; the firewall check asks nothing.
         assert!(unreadable_ruleset(jump, &[listener], &|_| None).is_none());
-    }
-
-    #[test]
-    fn a_project_off_the_name_pattern_is_a_usage_error_before_anything() {
-        let long = "a".repeat(33);
-        for bad in ["Bad_Name", long.as_str()] {
-            let failure = project_failure(bad).expect("refused");
-            assert_eq!(failure.code, 2);
-            assert_eq!(failure.error["code"], "cli_usage");
-        }
-        assert!(project_failure("alpha").is_none());
     }
 }

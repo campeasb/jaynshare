@@ -328,7 +328,7 @@ async fn unreachable_is_4_and_an_incompatible_answer_is_10() {
             "names the configuration path: {message}"
         );
         assert!(
-            message.contains("service status") && message.contains("container status"),
+            message.contains("service status"),
             "names the verbs to check: {message}"
         );
     }
@@ -591,7 +591,7 @@ async fn help_never_reads_or_connects_and_bare_invocation_is_2() {
         &["--config", "/nonexistent/config.toml", "switch", "--help"],
         &["serve", "--help"],
         &["claude", "--help"],
-        &["container", "install", "--help"],
+        &["server", "install", "--help"],
     ];
     for args in levels {
         let (code, stdout, stderr) = cli_raw(args, &env, None);
@@ -1573,14 +1573,6 @@ async fn confirmations_refused_skipped_and_interactive_only() {
     // deployment guide, it asks nothing; its refusals are the deploy exit rows.
     for args in [
         vec!["server", "uninstall", "--purge", "--yes"],
-        vec![
-            "container",
-            "uninstall",
-            "--project",
-            "p",
-            "--purge",
-            "--yes",
-        ],
         vec!["enrol", "--bundle", "/nonexistent", "--yes"],
     ] {
         let (code, _, stderr) = cli_raw(&args, &env, None);
